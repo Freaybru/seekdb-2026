@@ -431,6 +431,25 @@ cc_library(
     visibility = ["//unittest/sql/engine/expr:__pkg__"],
 )
 
+cc_library(
+    name = "file_sql_test_headers",
+    testonly = True,
+    hdrs = [
+        "engine/basic/ob_file_scan_utils.h",
+    ],
+    deps = [
+        ":sql_runtime_interface",
+        "//src/sql/parser:parser_internal_headers",
+        "//src/sql/parser:parser_public_headers",
+        "//src/oblib:oblib_common",
+    ] + _SQL_INTERFACE_NATIVE_DEPS,
+    tags = ["manual"],
+    visibility = [
+        "//unittest/sql/engine/basic:__pkg__",
+        "//unittest/sql/parser:__pkg__",
+    ],
+)
+
 # Complete checked-in SQL object closure except generated server-parser objects.
 cc_library(
     name = "sql_objects",
