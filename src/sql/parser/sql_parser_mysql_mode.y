@@ -52,7 +52,8 @@
     malloc_terminal_node(display_node, result->malloc_pool_, display_type); \
   } \
   malloc_non_terminal_node(explain_stmt, result->malloc_pool_, T_EXPLAIN, 5, \
-                           type_node, display_node, into_table, set_statement_id, stmt);
+                           type_node, display_node, into_table, set_statement_id, stmt); \
+  if (NULL != (no_use)) { explain_stmt->param_num_ = 1; /* DESC/DESCRIBE, used by file sql describe */ }
 %}
 
 %destructor {destroy_tree($$);}<node>
@@ -498,6 +499,7 @@ END_P SET_VAR DELIMITER
 %type <node> dynamic_sampling_hint
 %type <node> skip_index_type opt_skip_index_type_list
 %type <node> vec_index_params vec_index_param vec_index_param_value opt_with_vector_index_parameters
+%type <node> file_table_expr file_table_func_name file_table_option_list file_table_option file_table_option_value copy_stmt opt_copy_option_list copy_option_list copy_option copy_option_value
 %type <node> json_table_expr unnest_expr mock_jt_on_error_on_empty jt_column_list json_table_column_def
 %type <node> json_table_ordinality_column_def json_table_exists_column_def json_table_value_column_def json_table_nested_column_def
 %type <node> opt_value_on_empty_or_error_or_mismatch opt_on_mismatch
@@ -583,6 +585,7 @@ stmt:
   | drop_table_stmt         { $$ = $1; check_question_mark($$, result); }
   | drop_view_stmt          { $$ = $1; check_question_mark($$, result); }
   | explain_stmt            { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt               { $$ = $1; check_question_mark($$, result); }
   | create_outline_stmt     { $$ = $1; question_mark_issue($$, result); }
   | alter_outline_stmt      { $$ = $1; question_mark_issue($$, result); }
   | drop_outline_stmt       { $$ = $1; check_question_mark($$, result); }
@@ -10836,6 +10839,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
 | '(' table_references ')'
 {
   $$ = $2;
@@ -12307,8 +12314,8 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
+| DESCRIBE { malloc_terminal_node($$, result->malloc_pool_, T_INT); $$->value_ = 1; }
+| DESC  { malloc_terminal_node($$, result->malloc_pool_, T_INT); $$->value_ = 1; }
 ;
 
 explainable_stmt:
@@ -16624,6 +16631,176 @@ DAY
 *
 *  JSON TABLE
 *============================================================*/
+
+/*****************************************************************************
+ *
+ *  file table functions (file as database):
+ *    read_csv('path' [, name = value ...]) [[AS] alias]
+ *    read_json / read_ndjson / read_parquet / glob
+ *
+ *****************************************************************************/
+file_table_expr:
+file_table_func_name '(' STRING_VALUE ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNCTION, 4, $1, $3, NULL, NULL);
+  $$->is_tree_not_param_ = 1;
+}
+| file_table_func_name '(' STRING_VALUE ',' file_table_option_list ')'
+{
+  ParseNode *options = NULL;
+  merge_nodes(options, result, T_FILE_TABLE_OPTION_LIST, $5);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNCTION, 4, $1, $3, options, NULL);
+  $$->is_tree_not_param_ = 1;
+}
+| file_table_func_name '(' STRING_VALUE ')' relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNCTION, 4, $1, $3, NULL, $5);
+  $$->is_tree_not_param_ = 1;
+}
+| file_table_func_name '(' STRING_VALUE ',' file_table_option_list ')' relation_name
+{
+  ParseNode *options = NULL;
+  merge_nodes(options, result, T_FILE_TABLE_OPTION_LIST, $5);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNCTION, 4, $1, $3, options, $7);
+  $$->is_tree_not_param_ = 1;
+}
+| file_table_func_name '(' STRING_VALUE ')' AS relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNCTION, 4, $1, $3, NULL, $6);
+  $$->is_tree_not_param_ = 1;
+}
+| file_table_func_name '(' STRING_VALUE ',' file_table_option_list ')' AS relation_name
+{
+  ParseNode *options = NULL;
+  merge_nodes(options, result, T_FILE_TABLE_OPTION_LIST, $5);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_FUNCTION, 4, $1, $3, options, $8);
+  $$->is_tree_not_param_ = 1;
+}
+;
+
+file_table_func_name:
+NAME_OB
+{
+  if (0 == strcasecmp($1->str_value_, "read_csv")
+      || 0 == strcasecmp($1->str_value_, "read_csv_auto")
+      || 0 == strcasecmp($1->str_value_, "read_json")
+      || 0 == strcasecmp($1->str_value_, "read_json_auto")
+      || 0 == strcasecmp($1->str_value_, "read_ndjson")
+      || 0 == strcasecmp($1->str_value_, "read_ndjson_auto")
+      || 0 == strcasecmp($1->str_value_, "read_parquet")
+      || 0 == strcasecmp($1->str_value_, "parquet_scan")
+      || 0 == strcasecmp($1->str_value_, "glob")) {
+    $$ = $1;
+  } else {
+    yyerror(&@1, result, "unknown file table function\n");
+    YYERROR;
+  }
+}
+;
+
+file_table_option_list:
+file_table_option
+{
+  $$ = $1;
+}
+| file_table_option_list ',' file_table_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+file_table_option:
+column_label COMP_EQ file_table_option_value
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, $3);
+}
+| SKIP COMP_EQ file_table_option_value
+{
+  /* SKIP is reserved (SKIP LOCKED) but is a common CSV option name */
+  ParseNode *name = NULL;
+  get_non_reserved_node(name, result->malloc_pool_, @1.first_column, @1.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, name, $3);
+}
+;
+
+file_table_option_value:
+STRING_VALUE { $$ = $1; }
+| INTNUM { $$ = $1; }
+| '-' INTNUM
+{
+  $$ = $2;
+  $$->value_ = -$2->value_;
+}
+| DECIMAL_VAL { $$ = $1; }
+| APPROXNUM { $$ = $1; }
+| BOOL_VALUE { $$ = $1; }
+| NULLX { $$ = $1; }
+;
+
+/*****************************************************************************
+ *
+ *  COPY (query) TO 'path' [(option [value], ...)]
+ *  COPY table TO 'path' [(option [value], ...)]
+ *
+ *****************************************************************************/
+copy_stmt:
+COPY select_with_parens TO STRING_VALUE opt_copy_option_list
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_TO, 4, $2, NULL, $4, $5);
+  $4->is_tree_not_param_ = 1;
+  if (NULL != $5) { $5->is_tree_not_param_ = 1; }
+  dup_expr_string($$, result, @2.first_column, @2.last_column);
+}
+| COPY relation_factor TO STRING_VALUE opt_copy_option_list
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_TO, 4, NULL, $2, $4, $5);
+  $4->is_tree_not_param_ = 1;
+  if (NULL != $5) { $5->is_tree_not_param_ = 1; }
+  dup_expr_string($$, result, @2.first_column, @2.last_column);
+}
+;
+
+opt_copy_option_list:
+/* EMPTY */
+{ $$ = NULL; }
+| '(' copy_option_list ')'
+{
+  merge_nodes($$, result, T_COPY_OPTION_LIST, $2);
+}
+;
+
+copy_option_list:
+copy_option
+{
+  $$ = $1;
+}
+| copy_option_list ',' copy_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+copy_option:
+column_label
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_OPTION, 2, $1, NULL);
+}
+| column_label copy_option_value
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_OPTION, 2, $1, $2);
+}
+| column_label COMP_EQ copy_option_value
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_OPTION, 2, $1, $3);
+}
+;
+
+copy_option_value:
+STRING_VALUE { $$ = $1; }
+| INTNUM { $$ = $1; }
+| BOOL_VALUE { $$ = $1; }
+| column_label { $$ = $1; }
+;
 
 json_table_expr:
 JSON_TABLE '(' simple_expr ',' literal mock_jt_on_error_on_empty COLUMNS '(' jt_column_list ')' ')' relation_name
