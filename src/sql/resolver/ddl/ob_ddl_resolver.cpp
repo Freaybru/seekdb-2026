@@ -2129,7 +2129,7 @@ int ObDDLResolver::resolve_pending_ai_columns(const ObTableSchema &new_schema,
   ObAIColumnSchemaLookup lookup(new_schema, base_schema, pending_names);
   for (int64_t i = 0; OB_SUCC(ret) && i < ai_column_pendings_.count(); ++i) {
     const AIColumnPending &pending = ai_column_pendings_.at(i);
-    const ObColumnSchemaV2 *column = new_schema.get_column_schema(pending.column_name_);
+    const ObColumnSchemaV2 *column = ObAIColumnResolveHelper::find_column_by_name(new_schema, pending.column_name_);
     ObAIColumnDef def;
     if (OB_ISNULL(column) || OB_ISNULL(pending.attr_node_) || OB_ISNULL(allocator_)) {
       ret = OB_ERR_UNEXPECTED;

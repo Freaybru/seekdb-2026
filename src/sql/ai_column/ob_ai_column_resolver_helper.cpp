@@ -29,6 +29,21 @@ using namespace share::schema;
 namespace sql
 {
 
+const ObColumnSchemaV2 *ObAIColumnResolveHelper::find_column_by_name(const ObTableSchema &schema,
+                                                                    const ObString &name)
+{
+  const ObColumnSchemaV2 *col = schema.get_column_schema(name);
+  if (OB_ISNULL(col)) {
+    for (ObTableSchema::const_column_iterator it = schema.column_begin();
+         OB_ISNULL(col) && it != schema.column_end(); ++it) {
+      if (OB_NOT_NULL(*it) && 0 == (*it)->get_column_name_str().case_compare(name)) {
+        col = *it;
+      }
+    }
+  }
+  return col;
+}
+
 int ObAIColumnSchemaLookup::find_column(const ObString &name, bool &exists, uint64_t &column_id,
                                         bool &is_ai_column, bool &is_hidden) const
 {
@@ -37,7 +52,7 @@ int ObAIColumnSchemaLookup::find_column(const ObString &name, bool &exists, uint
   column_id = OB_INVALID_ID;
   is_ai_column = false;
   is_hidden = false;
-  const ObColumnSchemaV2 *col = new_schema_.get_column_schema(name);
+  const ObColumnSchemaV2 *col = ObAIColumnResolveHelper::find_column_by_name(new_schema_, name);
   if (OB_ISNULL(col) && OB_NOT_NULL(base_schema_)) {
     col = base_schema_->get_column_schema(name);
   }

@@ -75,6 +75,9 @@ private:
 class ObAIColumnResolveHelper
 {
 public:
+  // Name lookup that also works for AlterTableSchema, whose columns are not in the name hash.
+  static const share::schema::ObColumnSchemaV2 *find_column_by_name(
+      const share::schema::ObTableSchema &schema, const common::ObString &name);
   // Pure validation core (unit tested):
   //   expr_text      text of the AI function call
   //   dep_names      column names referenced by the input expression
