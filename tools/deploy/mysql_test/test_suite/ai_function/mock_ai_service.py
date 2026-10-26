@@ -1,10 +1,27 @@
 #!/usr/bin/env python3
 # Mock AI service for tools/deploy/mysql_test/test_suite/ai_function/t/ai_function_enhancement.test.
 # Listen on 0.0.0.0:8000 and serve the OpenAI, Ollama, and rerank payloads used by that test.
+# Routes are matched by suffix so both /v1/... and /compatible-mode/v1/... work.
+# Embeddings default to DEFAULT_DIMENSION when the request has no "dimensions".
 # Start: python3 tools/deploy/mysql_test/test_suite/ai_function/mock_ai_service.py
 
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+DEFAULT_DIMENSION = int(os.environ.get("MOCK_AI_DEFAULT_DIMENSION", "768"))
+
+
+def rerank_score(query, document):
+    if isinstance(document, str) and len(document) > 1 and document[0] in ("d", "s") and document[1:].isdigit():
+        return int(document[1:])
+    if not isinstance(document, str) or not isinstance(query, str):
+        return 0
+    if document == query:
+        return 1.0
+    common = len(set(document) & set(query))
+    return common / float(max(len(set(document) | set(query)), 1))
 
 
 def vector_for(text, dimension):
@@ -22,7 +39,7 @@ def vector_for(text, dimension):
     else:
         values = [len(text) if isinstance(text, str) else 0, 0, 0]
     if dimension is None:
-        dimension = 3
+        dimension = DEFAULT_DIMENSION
     if len(values) < dimension:
         values = values + [0] * (dimension - len(values))
     return values[:dimension]
@@ -56,16 +73,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": "invalid json"})
             return
         path = self.path.split("?", 1)[0]
-        if path == "/v1/chat/completions":
-            self._chat(request)
-        elif path == "/v1/embeddings":
-            self._embeddings(request)
-        elif path == "/v1/rerank":
-            self._rerank(request)
-        elif path == "/api/generate":
+        if path.endswith("/api/generate"):
             self._generate(request)
-        elif path == "/api/embed":
+        elif path.endswith("/api/embed"):
             self._ollama_embed(request)
+        elif path.endswith("/chat/completions"):
+            self._chat(request)
+        elif path.endswith("/embeddings"):
+            self._embeddings(request)
+        elif path.endswith("/rerank"):
+            self._rerank(request)
         else:
             self._send(404, {"error": "unknown path", "path": path})
 
@@ -100,11 +117,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _rerank(self, request):
         documents = request.get("documents") or []
+        query = request.get("query")
         results = []
         for index, document in enumerate(documents):
-            score = 0
-            if isinstance(document, str) and len(document) > 1 and document[0] in ("d", "s") and document[1:].isdigit():
-                score = int(document[1:])
+            score = rerank_score(query, document)
             results.append({"index": index, "relevance_score": score})
         results.reverse()
         self._send(200, {"results": results})
