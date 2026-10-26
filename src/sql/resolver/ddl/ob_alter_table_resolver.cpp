@@ -654,7 +654,6 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
         } else {
           hidden_alter_col.alter_type_ = OB_DDL_ADD_COLUMN;
           hidden_alter_col.set_table_id(table_schema_->get_table_id());
-          hidden_alter_col.set_tenant_id(table_schema_->get_tenant_id());
           if (OB_FAIL(alter_table_stmt->add_column(hidden_alter_col))) {
             SQL_RESV_LOG(WARN, "add hidden AI column failed", K(ret));
           }
