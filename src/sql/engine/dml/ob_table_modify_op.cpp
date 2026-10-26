@@ -110,6 +110,10 @@ int AIColumnTaskHandle::do_handle(ObTableModifyOp &op,
     }
   }
   if (OB_SUCC(ret) && sqls.count() > 0) {
+    // Run the bookkeeping statements as nested SQL of this DML (same transaction,
+    // same statement snapshot), the way foreign key cascades do.
+    const bool save_fk_cascading = op.get_exec_ctx().get_das_ctx().is_fk_cascading_;
+    op.get_exec_ctx().get_das_ctx().is_fk_cascading_ = true;
     if (OB_FAIL(op.begin_nested_session(false))) {
       LOG_WARN("begin nested session failed", K(ret));
     } else {
@@ -124,6 +128,7 @@ int AIColumnTaskHandle::do_handle(ObTableModifyOp &op,
         ret = OB_SUCCESS == ret ? tmp_ret : ret;
       }
     }
+    op.get_exec_ctx().get_das_ctx().is_fk_cascading_ = save_fk_cascading;
   }
   return ret;
 }

@@ -26,3 +26,25 @@ cc_test(
     ],
     target_compatible_with = ["@platforms//os:linux"],
 )
+
+cc_library(
+    name = "test_ai_column_parser_cases",
+    srcs = ["test_ai_column_parser.cpp"],
+    alwayslink = True,
+    deps = [
+        "//bazel/third_party:gtest",
+        "//src/sql:file_sql_test_headers",
+    ],
+)
+
+cc_test(
+    name = "test_ai_column_parser",
+    size = "small",
+    linkstatic = True,
+    features = ["-static_cpp_runtime", "-static_link_cpp_runtimes"],
+    deps = [
+        ":test_ai_column_parser_cases",
+        "//src/observer:liboceanbase",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
