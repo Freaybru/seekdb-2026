@@ -63,12 +63,16 @@ public:
   virtual int inner_rescan() override;
   virtual int switch_iterator() override;
   virtual int inner_get_next_row() override;
+  virtual int inner_get_next_batch(const int64_t max_row_cnt) override;
   virtual int inner_close() override;
   virtual void destroy() override;
 private:
   int calc_next_row();
   int open_file_scanner();
   int calc_next_file_row();
+  int next_file_row();
+  int fill_file_datum(const int64_t col_idx, const ObFileCell &cell, const int64_t batch_idx,
+                      const bool copy_str, ObDatum &datum);
   int calc_datum_from_expr(const int64_t col_idx,
                            const int64_t row_idx,
                            ObExpr *src_expr,

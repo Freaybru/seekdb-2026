@@ -473,7 +473,10 @@ int ObStaticEngineCG::check_vectorize_supported(bool &support,
       ObPhyOperatorType type = PHY_INVALID;
       if (OB_FAIL(get_phy_op_type(*op, type, is_root_job))) {
       } else {
-      if (ObOperatorFactory::is_vectorized(type)) {
+      if (ObOperatorFactory::is_vectorized(type)
+          && !(log_op_def::LOG_VALUES_TABLE_ACCESS == op->get_type()
+               && !static_cast<ObLogValuesTableAccess *>(op)->is_file_table())) {
+        // values tables are only vectorized for file scans (ACCESS_FILE)
         support = true;
       }
       ret = check_op_vectorization(op, schema_guard, type, disable_vectorize);
@@ -1694,6 +1697,9 @@ int ObStaticEngineCG::generate_spec(ObLogValuesTableAccess &op,
     ret = OB_ERR_UNEXPECTED;
   } else {
     spec.access_type_ = table_def->access_type_;
+    if (ObValuesTableDef::ACCESS_FILE != table_def->access_type_) {
+      spec.max_batch_size_ = 0;  // only the file scan implements inner_get_next_batch
+    }
     spec.start_param_idx_ = table_def->start_param_idx_;
     spec.end_param_idx_ = table_def->end_param_idx_;
     ObIAllocator &allocator = phy_plan_->get_allocator();

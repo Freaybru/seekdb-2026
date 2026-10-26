@@ -85,10 +85,55 @@ int ObValuesTableAccessOp::open_file_scanner()
   return ret;
 }
 
-int ObValuesTableAccessOp::calc_next_file_row()
+// convert one decoded file cell into the column datum. copy_str: strings must outlive the
+// scanner's per-row buffer (batch mode keeps max_batch_size rows alive at once).
+int ObValuesTableAccessOp::fill_file_datum(const int64_t col_idx, const ObFileCell &cell,
+                                           const int64_t batch_idx, const bool copy_str,
+                                           ObDatum &datum)
 {
   int ret = OB_SUCCESS;
-  const int64_t col_num = MY_SPEC.column_exprs_.count();
+  if (cell.is_null_) {
+    datum.set_null();
+  } else {
+    switch (MY_SPEC.file_columns_.at(col_idx).type_) {
+      case FILE_COL_BOOLEAN:
+      case FILE_COL_BIGINT:
+        datum.set_int(cell.int_);
+        break;
+      case FILE_COL_DOUBLE:
+        datum.set_double(cell.double_);
+        break;
+      case FILE_COL_DATE:
+        datum.set_date(static_cast<int32_t>(cell.int_));
+        break;
+      case FILE_COL_DATETIME:
+        datum.set_datetime(cell.int_);
+        break;
+      default: {
+        const int64_t len = cell.str_.length();
+        if (!copy_str || 0 == len) {
+          datum.set_string(cell.str_.ptr(), static_cast<int32_t>(len));
+        } else {
+          ObExpr *col_expr = MY_SPEC.column_exprs_.at(col_idx);
+          char *buf = col_expr->get_str_res_mem(eval_ctx_, len, batch_idx);
+          if (OB_ISNULL(buf)) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+            LOG_WARN("failed to allocate string buffer", K(ret), K(len));
+          } else {
+            MEMCPY(buf, cell.str_.ptr(), len);
+            datum.set_string(buf, static_cast<int32_t>(len));
+          }
+        }
+        break;
+      }
+    }
+  }
+  return ret;
+}
+
+int ObValuesTableAccessOp::next_file_row()
+{
+  int ret = OB_SUCCESS;
   if (OB_ISNULL(file_scanner_)) {
     ret = OB_NOT_INIT;
   } else if (OB_FAIL(file_scanner_->get_next_row())) {
@@ -98,36 +143,78 @@ int ObValuesTableAccessOp::calc_next_file_row()
                                            file_scanner_->error_info());
     }
   }
+  return ret;
+}
+
+int ObValuesTableAccessOp::calc_next_file_row()
+{
+  int ret = OB_SUCCESS;
+  const int64_t col_num = MY_SPEC.column_exprs_.count();
+  if (OB_FAIL(next_file_row())) {
+  }
   for (int64_t i = 0; OB_SUCC(ret) && i < col_num; ++i) {
     if (!MY_SPEC.file_needed_.at(i)) {
       continue;
     }
     ObExpr *col_expr = MY_SPEC.column_exprs_.at(i);
-    const ObFileCell &cell = file_scanner_->cell(i);
     ObDatum &datum = col_expr->locate_datum_for_write(eval_ctx_);
-    if (cell.is_null_) {
-      datum.set_null();
+    if (OB_FAIL(fill_file_datum(i, file_scanner_->cell(i), 0, false, datum))) {
     } else {
-      switch (MY_SPEC.file_columns_.at(i).type_) {
-        case FILE_COL_BOOLEAN:
-        case FILE_COL_BIGINT:
-          datum.set_int(cell.int_);
+      col_expr->set_evaluated_projected(eval_ctx_);
+    }
+  }
+  return ret;
+}
+
+// vectorized path: stream up to max_row_cnt rows straight into the column exprs' batch datums
+int ObValuesTableAccessOp::inner_get_next_batch(const int64_t max_row_cnt)
+{
+  int ret = OB_SUCCESS;
+  const int64_t col_num = MY_SPEC.column_exprs_.count();
+  const int64_t batch_size = std::max(1L, std::min(max_row_cnt, MY_SPEC.max_batch_size_));
+  int64_t size = 0;
+  clear_evaluated_flag();
+  if (OB_UNLIKELY(ObValuesTableDef::ACCESS_FILE != MY_SPEC.access_type_)) {
+    // only file tables are generated with a batch size (see the code generator)
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("batch access is only for file tables", K(ret), K(MY_SPEC.access_type_));
+  } else if (OB_FAIL(try_check_status())) {
+  } else {
+    ObSEArray<ObDatum *, 16> datums;
+    for (int64_t i = 0; OB_SUCC(ret) && i < col_num; ++i) {
+      ret = datums.push_back(MY_SPEC.file_needed_.at(i)
+          ? MY_SPEC.column_exprs_.at(i)->locate_datums_for_update(eval_ctx_, batch_size) : NULL);
+    }
+    while (OB_SUCC(ret) && size < batch_size) {
+      if (OB_FAIL(next_file_row())) {
+        if (OB_ITER_END == ret) {
+          ret = OB_SUCCESS;
+          brs_.end_ = true;
           break;
-        case FILE_COL_DOUBLE:
-          datum.set_double(cell.double_);
-          break;
-        case FILE_COL_DATE:
-          datum.set_date(static_cast<int32_t>(cell.int_));
-          break;
-        case FILE_COL_DATETIME:
-          datum.set_datetime(cell.int_);
-          break;
-        default:
-          datum.set_string(cell.str_.ptr(), cell.str_.length());
-          break;
+        }
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < col_num; ++i) {
+          if (NULL != datums.at(i)) {
+            ret = fill_file_datum(i, file_scanner_->cell(i), size, true, datums.at(i)[size]);
+          }
+        }
+        if (OB_SUCC(ret)) {
+          ++size;
+        }
       }
     }
-    col_expr->set_evaluated_projected(eval_ctx_);
+    if (OB_SUCC(ret)) {
+      brs_.size_ = size;
+      for (int64_t i = 0; i < col_num; ++i) {
+        if (NULL != datums.at(i)) {
+          ObEvalInfo &info = MY_SPEC.column_exprs_.at(i)->get_eval_info(eval_ctx_);
+          info.evaluated_ = true;
+          info.projected_ = true;
+          info.notnull_ = false;
+          info.cnt_ = size;
+        }
+      }
+    }
   }
   return ret;
 }

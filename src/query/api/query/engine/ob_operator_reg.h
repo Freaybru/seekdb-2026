@@ -321,7 +321,9 @@ REGISTER_OPERATOR(ObLogExprValues, PHY_EXPR_VALUES, ObExprValuesSpec, ObExprValu
 class ObLogValuesTableAccess;
 class ObValuesTableAccessSpec;
 class ObValuesTableAccessOp;
-REGISTER_OPERATOR(ObLogValuesTableAccess, PHY_VALUES_TABLE_ACCESS, ObValuesTableAccessSpec, ObValuesTableAccessOp, NOINPUT);
+// vectorized for file tables (ACCESS_FILE); other access types get max_batch_size_ = 0 in cg
+REGISTER_OPERATOR(ObLogValuesTableAccess, PHY_VALUES_TABLE_ACCESS, ObValuesTableAccessSpec,
+                  ObValuesTableAccessOp, NOINPUT, VECTORIZED_OP);
 
 class ObLogDelete;
 class ObTableDeleteSpec;
