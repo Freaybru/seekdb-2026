@@ -81,6 +81,17 @@ public:
                                      const uint64_t table_id,
                                      common::ObIAllocator &alloc,
                                      common::ObIArray<common::ObString> &names);
+  // Load the column ids part of every AI column definition of %table_id
+  // (column, hidden columns, dependencies) from committed metadata.
+  static int load_column_links(const uint64_t table_id,
+                               common::ObIArray<ObAIColumnDef> &defs);
+  // ai_column_strict_read: fail with OB_AI_COLUMN_NOT_READY when any row of the
+  // AI column is not READY yet (pending, running, retrying or failed).
+  static int check_column_ready(const common::ObString &db_name,
+                                const common::ObString &table_name,
+                                const uint64_t table_id,
+                                const uint64_t column_id,
+                                const common::ObString &column_name);
   // invalidate selected rows of one AI column and create their tasks
   static int invalidate_rows(common::ObISQLClient &client,
                              const common::ObString &db_name,

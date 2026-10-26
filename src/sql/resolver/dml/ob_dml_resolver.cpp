@@ -41,6 +41,7 @@
 #include "sql/resolver/dcl/ob_dcl_resolver.h"
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
 #include "sql/hybrid_search/ob_hybrid_search_executor.h"
+#include "sql/ai_column/ob_ai_column_ddl.h"
 
 namespace oceanbase
 {
@@ -1863,6 +1864,11 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
     const ObColumnSchemaV2 *col_schema = NULL;
     const ObTableSchema *table_schema = NULL;
     uint64_t tid = table_item.ref_id_;
+    if (!include_hidden && session_info_->is_inner()
+        && ObAIColumnUtil::is_hidden_column_name(column_name)) {
+      // AI column bookkeeping (worker / RETRY) addresses the hidden state columns by name
+      include_hidden = true;
+    }
     if (!include_hidden) {
       if (!ObCharset::case_insensitive_equal(column_name, OB_HIDDEN_PK_INCREMENT_COLUMN_NAME)) {
         //do nothing
@@ -2036,6 +2042,55 @@ int ObDMLResolver::replace_col_ref_prefix(ObQualifiedName &q_name)
 }
 
 
+// A user statement referencing an AI result column: the plan is not cached and,
+// with ai_column_strict_read = ON, the column must be completely READY.
+int ObDMLResolver::check_ai_column_reference(const ObRawExpr *expr)
+{
+  int ret = OB_SUCCESS;
+  const ObColumnRefRawExpr *col_expr = NULL;
+  const TableItem *table_item = NULL;
+  const ObColumnSchemaV2 *col_schema = NULL;
+  const ObTableSchema *table_schema = NULL;
+  ObDMLStmt *stmt = get_stmt();
+  if (OB_ISNULL(expr) || !expr->is_column_ref_expr() || OB_ISNULL(stmt)
+      || OB_ISNULL(schema_checker_) || OB_ISNULL(session_info_)
+      || session_info_->is_inner()) {
+    // nothing to check
+  } else if (FALSE_IT(col_expr = static_cast<const ObColumnRefRawExpr *>(expr))) {
+  } else if (OB_ISNULL(table_item = stmt->get_table_item_by_id(col_expr->get_table_id()))
+             || !table_item->is_basic_table()) {
+    // column from an outer statement or a view: the inner statement checks it
+  } else if (OB_FAIL(schema_checker_->get_table_schema(table_item->ref_id_, table_schema))) {
+    ret = OB_SUCCESS;
+  } else if (OB_ISNULL(table_schema) || !table_schema->is_user_table()) {
+  } else if (OB_ISNULL(col_schema = table_schema->get_column_schema(col_expr->get_column_id()))) {
+  } else if (!col_schema->is_ai_result_column()) {
+  } else {
+    bool strict = false;
+    if (OB_NOT_NULL(params_.query_ctx_)) {
+      params_.query_ctx_->has_ai_column_ref_ = true;
+    }
+    if (OB_FAIL(session_info_->get_ai_column_strict_read(strict))) {
+      LOG_WARN("get ai_column_strict_read failed", K(ret));
+    } else if (!strict) {
+    } else {
+      const ObDatabaseSchema *db_schema = NULL;
+      if (OB_FAIL(schema_checker_->get_database_schema(table_schema->get_database_id(), db_schema))) {
+        LOG_WARN("get database schema failed", K(ret));
+      } else if (OB_ISNULL(db_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(ObAIColumnDDLUtil::check_column_ready(db_schema->get_database_name_str(),
+                                                              table_schema->get_table_name_str(),
+                                                              table_schema->get_table_id(),
+                                                              col_schema->get_column_id(),
+                                                              col_schema->get_column_name_str()))) {
+        LOG_WARN("AI column not ready", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObDMLResolver::resolve_columns(ObRawExpr *&expr, ObArray<ObQualifiedName> &columns)
 {
   int ret = OB_SUCCESS;
@@ -2051,6 +2106,7 @@ int ObDMLResolver::resolve_columns(ObRawExpr *&expr, ObArray<ObQualifiedName> &c
     } else if (OB_FAIL(resolve_qualified_identifier(q_name, columns, real_exprs, real_ref_expr))) {
       LOG_WARN_IGNORE_COL_NOTFOUND(ret, "resolve column ref expr failed", K(ret), K(q_name));
       report_user_error_msg(ret, expr, q_name);
+    } else if (OB_FAIL(check_ai_column_reference(real_ref_expr))) {
     } else if (OB_FAIL(real_exprs.push_back(real_ref_expr))) {
     } else if (OB_FAIL(ref_exprs.push_back(q_name.ref_expr_))
               || OB_FAIL(replace_ref_exprs.push_back(real_ref_expr))) {

@@ -3533,6 +3533,9 @@ int ObSql::need_add_plan(const ObPlanCacheCtx &pc_ctx,
   } else if (result.get_exec_context().get_stmt_factory()->get_query_ctx()->has_file_table()) {
     // file sql: schema is inferred from file content, which may change between executions
     need_add_plan = false;
+  } else if (result.get_exec_context().get_stmt_factory()->get_query_ctx()->has_ai_column_ref()) {
+    // AI column readiness (ai_column_strict_read) is checked while resolving
+    need_add_plan = false;
   }
   return ret;
 }

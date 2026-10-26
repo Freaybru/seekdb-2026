@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
+#include "sql/ai_column/ob_ai_column_ddl.h"
 #include "ob_table_modify_op.h"
 #include "share/ob_autoincrement_service.h"
 #include "query/session/ob_inner_sql_connection_access.h"
@@ -32,6 +33,101 @@ using namespace share::schema;
 using namespace observer;
 namespace sql
 {
+int AIColumnTaskHandle::print_predicate(ObTableModifyOp &op,
+                                        const ObAIColumnDMLArg &arg,
+                                        const ObExprPtrIArray &row,
+                                        ObIAllocator &alloc,
+                                        ObString &escaped_pred)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<ObString, 4> names;
+  ObSEArray<ObObj, 4> values;
+  ObString pred;
+  const ObTimeZoneInfo *tz_info = op.get_obj_print_params().tz_info_;
+  ObEvalCtx &eval_ctx = op.get_eval_ctx();
+  for (int64_t i = 0; OB_SUCC(ret) && i < arg.pk_columns_.count(); ++i) {
+    const ObForeignKeyColumn &col = arg.pk_columns_.at(i);
+    ObDatum *datum = NULL;
+    ObObj obj;
+    if (col.idx_ < 0 || col.idx_ >= row.count() || OB_ISNULL(row.at(col.idx_))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid AI column pk index", K(ret), K(col), K(row.count()));
+    } else if (OB_FAIL(row.at(col.idx_)->eval(eval_ctx, datum))) {
+      LOG_WARN("eval pk column failed", K(ret));
+    } else if (OB_FAIL(datum->to_obj(obj, row.at(col.idx_)->obj_meta_))) {
+    } else if (OB_FAIL(ob_write_obj(alloc, obj, obj))) {
+    } else if (OB_FAIL(names.push_back(col.name_))) {
+    } else if (OB_FAIL(values.push_back(obj))) {
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(ObAIColumnDDLUtil::print_rowkey_predicate(names, values, tz_info,
+                                                               alloc, pred))) {
+    LOG_WARN("print rowkey predicate failed", K(ret));
+  } else if (OB_FAIL(ObAIColumnUtil::escape_sql_string(pred, alloc, escaped_pred))) {
+  }
+  return ret;
+}
+
+int AIColumnTaskHandle::do_handle(ObTableModifyOp &op,
+                                  const ObDMLBaseCtDef &dml_ctdef,
+                                  const ObDmlEventType dml_event)
+{
+  int ret = OB_SUCCESS;
+  const ObAIColumnDMLArg &arg = dml_ctdef.ai_arg_;
+  ObArenaAllocator alloc("AIColTask");
+  ObString old_pred;
+  ObString new_pred;
+  ObSEArray<ObSqlString *, 3> sqls;
+  ObSqlString del_old;
+  ObSqlString del_new;
+  ObSqlString ins_new;
+  char rid[ObAIColumnDDLUtil::REQUEST_ID_BUF_LEN];
+  const bool has_old = DE_UPDATING == dml_event || DE_DELETING == dml_event;
+  const bool has_new = DE_UPDATING == dml_event || DE_INSERTING == dml_event;
+  if (!arg.is_valid()) {
+  } else if (has_old && OB_FAIL(print_predicate(op, arg, dml_ctdef.old_row_, alloc, old_pred))) {
+  } else if (has_new && OB_FAIL(print_predicate(op, arg, dml_ctdef.new_row_, alloc, new_pred))) {
+  } else {
+    if (OB_SUCC(ret) && has_old) {
+      if (OB_FAIL(ObAIColumnDDLUtil::append_task_delete_sql(arg.table_id_, arg.column_ids_,
+                                                           old_pred, del_old))) {
+      } else if (OB_FAIL(sqls.push_back(&del_old))) {
+      }
+    }
+    if (OB_SUCC(ret) && has_new) {
+      if (has_old && old_pred == new_pred) {
+      } else if (OB_FAIL(ObAIColumnDDLUtil::append_task_delete_sql(arg.table_id_, arg.column_ids_,
+                                                                  new_pred, del_new))) {
+      } else if (OB_FAIL(sqls.push_back(&del_new))) {
+      }
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(ObAIColumnDDLUtil::gen_request_id(rid, sizeof(rid)))) {
+      } else if (OB_FAIL(ObAIColumnDDLUtil::append_task_insert_sql(arg.table_id_, arg.column_ids_,
+                                                                  new_pred, ObString(rid), ins_new))) {
+      } else if (OB_FAIL(sqls.push_back(&ins_new))) {
+      }
+    }
+  }
+  if (OB_SUCC(ret) && sqls.count() > 0) {
+    if (OB_FAIL(op.begin_nested_session(false))) {
+      LOG_WARN("begin nested session failed", K(ret));
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < sqls.count(); ++i) {
+        if (OB_FAIL(op.execute_write(sqls.at(i)->ptr()))) {
+          LOG_WARN("execute AI column task sql failed", K(ret), K(sqls.at(i)->string()));
+        }
+      }
+      int tmp_ret = op.end_nested_session();
+      if (OB_SUCCESS != tmp_ret) {
+        LOG_WARN("end nested session failed", K(tmp_ret));
+        ret = OB_SUCCESS == ret ? tmp_ret : ret;
+      }
+    }
+  }
+  return ret;
+}
+
 int ForeignKeyHandle::do_handle(ObTableModifyOp &op,
                                 const ObDMLBaseCtDef &dml_ctdef,
                                 ObDMLBaseRtDef &dml_rtdef)

@@ -398,6 +398,27 @@ struct SeRowkeyItem
 typedef common::hash::ObHashSet<ObRowkey, common::hash::NoPthreadDefendMode> SeRowkeyDistCtx;
 
 //dml base compile info definition
+// AI COLUMN task maintenance of the primary table: the DML operator rewrites
+// __all_ai_column_task rows of the modified row inside the same transaction.
+struct ObAIColumnDMLArg
+{
+  OB_UNIS_VERSION(1);
+public:
+  ObAIColumnDMLArg(common::ObIAllocator &alloc)
+    : table_id_(common::OB_INVALID_ID),
+      column_ids_(alloc),
+      pk_columns_(alloc)
+  { }
+  bool is_valid() const { return column_ids_.count() > 0 && pk_columns_.count() > 0; }
+  TO_STRING_KV(K_(table_id), K_(column_ids), K_(pk_columns));
+  uint64_t table_id_;
+  // AI result columns whose task must be rebuilt (insert / triggered update) or
+  // removed (delete)
+  common::ObFixedArray<uint64_t, common::ObIAllocator> column_ids_;
+  // primary key columns, idx_ points into old_row_ / new_row_
+  common::ObFixedArray<ObForeignKeyColumn, common::ObIAllocator> pk_columns_;
+};
+
 struct ObDMLBaseCtDef
 {
   OB_UNIS_VERSION(1);
@@ -414,7 +435,8 @@ public:
                        K_(view_check_exprs),
                        K_(is_primary_index),
                        K_(is_table_without_pk),
-                       KPC_(trans_info_expr));
+                       KPC_(trans_info_expr),
+                       K_(ai_arg));
 
   ObDMLOpType dml_type_;
   ExprFixedArray check_cst_exprs_;
@@ -438,6 +460,7 @@ public:
   bool reserved_advanced_trigger_;
   ObExpr *trans_info_expr_;
   bool is_vec_hnsw_index_vid_opt_;
+  ObAIColumnDMLArg ai_arg_;
 protected:
   ObDMLBaseCtDef(common::ObIAllocator &alloc,
                  ObDASDMLBaseCtDef &das_base_ctdef,
@@ -456,7 +479,8 @@ protected:
       is_table_without_pk_(false),
       reserved_advanced_trigger_(false),
       trans_info_expr_(nullptr),
-      is_vec_hnsw_index_vid_opt_(false)
+      is_vec_hnsw_index_vid_opt_(false),
+      ai_arg_(alloc)
   { }
 };
 

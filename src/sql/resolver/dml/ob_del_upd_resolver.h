@@ -72,6 +72,17 @@ protected:
 
   int resolve_additional_assignments(common::ObIArray<ObTableAssignment> &table_assigns,
                                      const ObStmtScope scope);
+  int check_ai_column_not_assigned(const TableItem &table_item, const uint64_t column_id);
+  int add_ai_column_implicit_assignment(common::ObIArray<ObTableAssignment> &assigns,
+                                        const int64_t idx,
+                                        const TableItem &table_item,
+                                        const share::schema::ObTableSchema &table_schema,
+                                        const uint64_t column_id,
+                                        const bool null_value);
+  int resolve_ai_column_assignments(common::ObIArray<ObTableAssignment> &assigns,
+                                    const int64_t idx,
+                                    const TableItem &table_item,
+                                    const share::schema::ObTableSchema &table_schema);
   int generate_wrapper_expr_for_assignemnts(common::ObIArray<ObAssignment> &assigns,
                                             bool has_before_trigger);
 

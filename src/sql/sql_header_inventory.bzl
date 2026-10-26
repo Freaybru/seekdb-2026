@@ -1,6 +1,9 @@
 """SQL interface and composition headers."""
 
 SQL_PUBLIC_HEADER_ROOTS = [
+    "ai_column/ob_ai_column_define.h",
+    "ai_column/ob_ai_column_ddl.h",
+    "ai_column/ob_ai_column_service.h",
     "code_generator/ob_expr_generator_impl.h",
     "code_generator/ob_static_engine_expr_cg.h",
     "das/iter/ob_das_iter.h",

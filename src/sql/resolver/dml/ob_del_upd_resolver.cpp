@@ -24,6 +24,7 @@
 #include "sql/parser/parse_malloc.h"
 #include "query/vector/ob_vector_index_util.h"
 #include "sql/das/ob_domain_id.h"
+#include "sql/ai_column/ob_ai_column_ddl.h"
 
 namespace oceanbase
 {
@@ -511,6 +512,7 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
     } else if (OB_ISNULL(table_schema)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("fail to get table schema", KPC(table_item), K(table_schema));
+    } else if (OB_FAIL(resolve_ai_column_assignments(assigns, i, *table_item, *table_schema))) {
     } else if (OB_FAIL(table_schema->has_before_update_row_trigger(*schema_guard, trigger_exist))) {
     } else if (OB_FAIL(generate_wrapper_expr_for_assignemnts(assigns.at(i).assignments_, trigger_exist))) {
     } else if (OB_FAIL(check_update_vector_col_with_vector_index(table_schema,
@@ -616,6 +618,149 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
     } else if (OB_SUCC(ret)) {
       // for UPDATE
       if (OB_FAIL(check_heap_table_update(assigns.at(i)))) {
+      }
+    }
+  }
+  return ret;
+}
+
+// Business SQL must not write AI result columns or their hidden bookkeeping
+// columns; only the AI column service / DDL (inner sessions) may.
+int ObDelUpdResolver::check_ai_column_not_assigned(const TableItem &table_item,
+                                                   const uint64_t column_id)
+{
+  int ret = OB_SUCCESS;
+  const ObTableSchema *table_schema = NULL;
+  const ObColumnSchemaV2 *col_schema = NULL;
+  if (OB_ISNULL(session_info_) || OB_ISNULL(schema_checker_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (session_info_->is_inner() || !table_item.is_basic_table()) {
+  } else if (OB_FAIL(schema_checker_->get_table_schema(table_item.ref_id_, table_schema))) {
+  } else if (OB_ISNULL(table_schema)) {
+  } else if (OB_ISNULL(col_schema = table_schema->get_column_schema(column_id))) {
+  } else if (col_schema->is_ai_result_column() || col_schema->is_ai_hidden_column()) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "assigning a value to an AI column");
+  }
+  return ret;
+}
+
+int ObDelUpdResolver::add_ai_column_implicit_assignment(ObIArray<ObTableAssignment> &assigns,
+                                                        const int64_t idx,
+                                                        const TableItem &table_item,
+                                                        const ObTableSchema &table_schema,
+                                                        const uint64_t column_id,
+                                                        const bool null_value)
+{
+  int ret = OB_SUCCESS;
+  ObDMLStmt *stmt = get_stmt();
+  const ObColumnSchemaV2 *column_schema = NULL;
+  ObSEArray<ObColumnRefRawExpr *, 1> col_exprs;
+  ColumnItem *col_item = NULL;
+  bool exist = false;
+  ObAssignment assignment;
+  if (OB_ISNULL(stmt) || OB_ISNULL(params_.expr_factory_) || OB_ISNULL(params_.allocator_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(column_schema = table_schema.get_column_schema(column_id))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("AI column schema not found", K(ret), K(column_id));
+  } else if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns.at(idx).assignments_,
+                                                             table_item.table_id_, column_id, exist))) {
+  } else if (exist) {
+  } else if (OB_FAIL(add_column_to_stmt(table_item, *column_schema, col_exprs))) {
+  } else if (col_exprs.empty()) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(col_item = stmt->get_column_item_by_id(table_item.table_id_,
+                                                               col_exprs.at(0)->get_column_id()))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    assignment.column_expr_ = col_item->expr_;
+    assignment.is_implicit_ = true;
+    if (null_value) {
+      ret = ObRawExprUtils::build_null_expr(*params_.expr_factory_, assignment.expr_);
+    } else {
+      ObConstRawExpr *c = NULL;
+      ret = ObRawExprUtils::build_const_int_expr(*params_.expr_factory_, ObIntType,
+                                                 static_cast<int64_t>(AI_ROW_PENDING), c);
+      assignment.expr_ = c;
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(ObRawExprUtils::build_column_conv_expr(*params_.expr_factory_,
+                                                              *params_.allocator_,
+                                                              *col_item->get_expr(),
+                                                              assignment.expr_,
+                                                              session_info_))) {
+    } else if (OB_FAIL(add_assignment(assigns, &table_item, col_item, assignment))) {
+    }
+  }
+  return ret;
+}
+
+// UPDATE (or INSERT ... ON DUPLICATE KEY UPDATE) touching a dependency or the
+// primary key of an AI column hides the old result in the same statement:
+// result = NULL, state = PENDING; the DML operator then (re)creates the task.
+int ObDelUpdResolver::resolve_ai_column_assignments(ObIArray<ObTableAssignment> &assigns,
+                                                    const int64_t idx,
+                                                    const TableItem &table_item,
+                                                    const ObTableSchema &table_schema)
+{
+  int ret = OB_SUCCESS;
+  bool has_ai = false;
+  for (ObTableSchema::const_column_iterator iter = table_schema.column_begin();
+       !has_ai && iter != table_schema.column_end(); ++iter) {
+    has_ai = (NULL != *iter) && (*iter)->is_ai_result_column();
+  }
+  if (!has_ai || OB_ISNULL(session_info_) || idx < 0 || idx >= assigns.count()) {
+  } else if (!table_item.is_basic_table()) {
+  } else {
+    ObTableAssignment &table_assign = assigns.at(idx);
+    for (int64_t i = 0; OB_SUCC(ret) && i < table_assign.assignments_.count(); ++i) {
+      const ObColumnRefRawExpr *col = table_assign.assignments_.at(i).column_expr_;
+      if (OB_NOT_NULL(col) && !table_assign.assignments_.at(i).is_implicit_
+          && OB_FAIL(check_ai_column_not_assigned(table_item, col->get_column_id()))) {
+      }
+    }
+    if (OB_FAIL(ret) || session_info_->is_inner()) {
+      // bookkeeping SQL of the AI column service maintains state itself
+    } else {
+      ObSEArray<ObAIColumnDef, 4> defs;
+      bool pk_assigned = false;
+      const ObRowkeyInfo &rowkey_info = table_schema.get_rowkey_info();
+      if (OB_FAIL(ObAIColumnDDLUtil::load_column_links(table_schema.get_table_id(), defs))) {
+        LOG_WARN("load AI column metadata failed", K(ret));
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && !pk_assigned && i < table_assign.assignments_.count(); ++i) {
+        const ObColumnRefRawExpr *col = table_assign.assignments_.at(i).column_expr_;
+        bool is_rowkey = false;
+        if (OB_NOT_NULL(col) && OB_FAIL(rowkey_info.is_rowkey_column(col->get_column_id(), is_rowkey))) {
+        } else {
+          pk_assigned = is_rowkey;
+        }
+      }
+      for (int64_t d = 0; OB_SUCC(ret) && d < defs.count(); ++d) {
+        const ObAIColumnDef &def = defs.at(d);
+        bool triggered = pk_assigned;
+        for (int64_t i = 0; !triggered && i < table_assign.assignments_.count(); ++i) {
+          const ObColumnRefRawExpr *col = table_assign.assignments_.at(i).column_expr_;
+          triggered = OB_NOT_NULL(col) && !table_assign.assignments_.at(i).is_implicit_
+                      && def.depends_on(col->get_column_id());
+        }
+        if (!triggered) {
+        } else if (OB_ISNULL(table_schema.get_column_schema(def.column_id_))
+                   || OB_ISNULL(table_schema.get_column_schema(def.state_column_id_))) {
+          // metadata of a column being dropped
+        } else {
+          if (OB_FAIL(add_ai_column_implicit_assignment(assigns, idx, table_item, table_schema,
+                                                        def.column_id_, true))
+              || OB_FAIL(add_ai_column_implicit_assignment(assigns, idx, table_item, table_schema,
+                                                           def.state_column_id_, false))
+              || OB_FAIL(add_ai_column_implicit_assignment(assigns, idx, table_item, table_schema,
+                                                           def.request_column_id_, true))
+              || OB_FAIL(add_ai_column_implicit_assignment(assigns, idx, table_item, table_schema,
+                                                           def.result_spec_column_id_, true))) {
+            LOG_WARN("add AI column invalidation failed", K(ret), K(def));
+          }
+        }
       }
     }
   }
@@ -2170,6 +2315,7 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
       } else if (!session_info_->get_ddl_info().is_ddl() && OB_HIDDEN_SESS_CREATE_TIME_COLUMN_ID == column_expr->get_column_id()) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "specify __sess_create_time value");
+      } else if (OB_FAIL(check_ai_column_not_assigned(*table_item, column_expr->get_column_id()))) {
       } else if (OB_FAIL(mock_values_column_ref(column_expr))) {
       }
     }//end for

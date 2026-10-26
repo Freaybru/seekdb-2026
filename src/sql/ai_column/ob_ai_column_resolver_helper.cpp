@@ -138,8 +138,8 @@ int ObAIColumnResolveHelper::build_definition(ObIAllocator &alloc,
     } else if (is_vector || ObCollectionSQLType == result_type) {
       ret = OB_NOT_SUPPORTED;
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI_COMPLETE AI COLUMN of VECTOR type");
-    } else if (ob_is_lob_locator(result_type) || ob_is_geometry(result_type)
-               || ob_is_enum_or_set_type(result_type) || ob_is_roaring_bitmap(result_type)) {
+    } else if (ob_is_geometry(result_type)
+               || ob_is_enum_or_set_type(result_type)) {
       ret = OB_NOT_SUPPORTED;
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN of this result type");
     }
@@ -358,7 +358,6 @@ int ObAIColumnResolveHelper::build_hidden_columns(ObIAllocator &alloc,
     ObObj default_value;
     const ObAIColumnHiddenKind kind = static_cast<ObAIColumnHiddenKind>(k);
     col.set_table_id(result_column.get_table_id());
-    col.set_tenant_id(result_column.get_tenant_id());
     col.set_is_hidden(true);
     col.add_column_flag(AI_HIDDEN_COLUMN_FLAG);
     col.set_nullable(true);

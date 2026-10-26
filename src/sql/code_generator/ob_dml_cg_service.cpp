@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_CG
+#include "sql/ai_column/ob_ai_column_define.h"
 #include "ob_dml_cg_service.h"
 #include "sql/code_generator/ob_static_engine_cg.h"
 #include "sql/engine/ob_physical_plan.h"
@@ -2155,10 +2156,110 @@ int ObDmlCgService::generate_dml_base_ctdef(ObLogDelUpd &op,
     if (OB_FAIL(convert_foreign_keys(op, index_dml_info, dml_base_ctdef))) {
     }
   }
+  if (OB_SUCC(ret) && index_dml_info.is_primary_index_) {
+    if (OB_FAIL(convert_ai_columns(op, index_dml_info, dml_base_ctdef, dml_event))) {
+      LOG_WARN("convert AI columns failed", K(ret));
+    }
+  }
   // Only enable when pl_static_engine is enabled that mysqltest will enable
   if (OB_SUCC(ret) && index_dml_info.is_primary_index_) {
     //add trigger
     if (OB_FAIL(convert_triggers(op, index_dml_info, dml_base_ctdef, dml_event))) {
+    }
+  }
+  return ret;
+}
+
+// AI COLUMN: which AI result columns need task maintenance for this DML
+//   insert / delete : every AI column of the table
+//   update          : AI columns invalidated by the resolver (implicit
+//                     assignment of the hidden state column)
+int ObDmlCgService::convert_ai_columns(ObLogDelUpd &op,
+                                       const IndexDMLInfo &index_dml_info,
+                                       ObDMLBaseCtDef &dml_ctdef,
+                                       uint64_t dml_event)
+{
+  int ret = OB_SUCCESS;
+  ObLogPlan *log_plan = NULL;
+  ObSqlSchemaGuard *schema_guard = NULL;
+  const ObTableSchema *table_schema = NULL;
+  ObSEArray<uint64_t, 4> ai_ids;
+  ObSEArray<uint64_t, 4> state_ids;
+  if (OB_ISNULL(log_plan = op.get_plan()) || OB_ISNULL(cg_.phy_plan_) ||
+      OB_ISNULL(schema_guard = log_plan->get_optimizer_context().get_sql_schema_guard())) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(schema_guard->get_table_schema(index_dml_info.ref_table_id_, table_schema))) {
+  } else if (OB_ISNULL(table_schema) || !table_schema->is_user_table()) {
+  } else {
+    for (ObTableSchema::const_column_iterator iter = table_schema->column_begin();
+         OB_SUCC(ret) && iter != table_schema->column_end(); ++iter) {
+      const ObColumnSchemaV2 *col = *iter;
+      if (OB_NOT_NULL(col) && col->is_ai_result_column()) {
+        ObString state_name;
+        const ObColumnSchemaV2 *state_col = NULL;
+        if (OB_FAIL(ObAIColumnUtil::build_hidden_column_name(AI_HIDDEN_STATE,
+                                                             col->get_column_name_str(),
+                                                             cg_.phy_plan_->get_allocator(),
+                                                             state_name))) {
+        } else if (OB_ISNULL(state_col = table_schema->get_column_schema(state_name))) {
+        } else if (OB_FAIL(ai_ids.push_back(col->get_column_id()))) {
+        } else if (OB_FAIL(state_ids.push_back(state_col->get_column_id()))) {
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret) && ai_ids.count() > 0
+      && ObTriggerEvents::is_update_event(dml_event)) {
+    // keep only columns whose state is reset by an implicit assignment
+    ObSEArray<uint64_t, 4> triggered;
+    for (int64_t i = 0; OB_SUCC(ret) && i < ai_ids.count(); ++i) {
+      bool found = false;
+      for (int64_t j = 0; !found && j < index_dml_info.assignments_.count(); ++j) {
+        const ObAssignment &assign = index_dml_info.assignments_.at(j);
+        found = assign.is_implicit_ && OB_NOT_NULL(assign.column_expr_)
+                && assign.column_expr_->get_column_id() == state_ids.at(i);
+      }
+      if (found && OB_FAIL(triggered.push_back(ai_ids.at(i)))) {
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(ai_ids.assign(triggered))) {
+    }
+  }
+  if (OB_SUCC(ret) && ai_ids.count() > 0) {
+    ObAIColumnDMLArg &arg = dml_ctdef.ai_arg_;
+    const ObRowkeyInfo &rowkey_info = table_schema->get_rowkey_info();
+    arg.table_id_ = table_schema->get_table_id();
+    if (OB_FAIL(arg.column_ids_.init(ai_ids.count()))) {
+    } else if (OB_FAIL(arg.column_ids_.assign(ai_ids))) {
+    } else if (OB_FAIL(arg.pk_columns_.init(rowkey_info.get_size()))) {
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_info.get_size(); ++i) {
+      uint64_t cid = OB_INVALID_ID;
+      const ObColumnSchemaV2 *col = NULL;
+      ObForeignKeyColumn pk_col;
+      int64_t idx = -1;
+      if (OB_FAIL(rowkey_info.get_column_id(i, cid))) {
+      } else if (OB_ISNULL(col = table_schema->get_column_schema(cid))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        for (int64_t k = 0; idx < 0 && k < dml_ctdef.column_ids_.count(); ++k) {
+          if (dml_ctdef.column_ids_.at(k) == cid) {
+            idx = k;
+          }
+        }
+        if (idx < 0) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("primary key column not in DML row", K(ret), K(cid));
+        } else if (OB_FAIL(deep_copy_ob_string(cg_.phy_plan_->get_allocator(),
+                                               col->get_column_name_str(), pk_col.name_))) {
+        } else {
+          pk_col.idx_ = static_cast<int32_t>(idx);
+          ret = arg.pk_columns_.push_back(pk_col);
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      cg_.phy_plan_->set_has_nested_sql(true);
     }
   }
   return ret;

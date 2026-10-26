@@ -4859,7 +4859,8 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   /* async AI column: tags json AI COLUMN (AI_COMPLETE('m', content)) WITH (sync_mode='async') */
   ParseNode *ai_attr = NULL;
   ParseNode *attributes = NULL;
-  set_data_type_collation($2, NULL, false, true);
+  ParseNode *no_collation = NULL;
+  set_data_type_collation($2, no_collation, false, true);
   dup_expr_string($6, result, @6.first_column, @6.last_column);
   malloc_non_terminal_node(ai_attr, result->malloc_pool_, T_AI_COLUMN_ATTR, 2, $6, $8);
   merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, ai_attr);

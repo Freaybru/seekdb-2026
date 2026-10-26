@@ -345,6 +345,7 @@ protected:
   int replace_col_ref_prefix(ObQualifiedName &col_ref, uint64_t idx, ObQualifiedName &q_name, bool &try_success);
   int replace_col_ref_prefix(ObQualifiedName &q_name);
   int resolve_columns(ObRawExpr *&expr, common::ObArray<ObQualifiedName> &columns);
+  int check_ai_column_reference(const ObRawExpr *expr);
   int try_resolve_external_symbol(ObQualifiedName &q_name,
                                   ObIArray<ObQualifiedName> &columns,
                                   ObIArray<ObRawExpr*> &real_exprs,

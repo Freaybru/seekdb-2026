@@ -91,6 +91,7 @@ int ObServer::get_lower_bound_freeze_info(const int64_t snapshot_version, share:
 #include "observer/vector_index/ob_plugin_vector_index_service.h"
 #include "observer/composition/retrieval/ob_das_legacy_tr_merge_iter.h"
 #include "observer/change_stream/ob_change_stream_mgr.h"
+#include "sql/ai_column/ob_ai_column_service.h"
 #include "share/roaringbitmap/ob_rb_memory_mgr.h"
 #include "storage/fts/dict/ob_ft_cache.h"
 #include "lib/utility/ob_target_specific.h"
@@ -1400,6 +1401,15 @@ int ObServer::start()
   } else if (!stop_) {
     GCTX.status_ = SS_SERVING;
     GCTX.start_service_time_ = start_service_time;
+    {
+      // AI COLUMN async worker (best effort: AI columns stay PENDING without it)
+      int tmp_ret = OB_SUCCESS;
+      if (OB_SUCCESS != (tmp_ret = sql::ObAIColumnService::get_instance().init())) {
+        LOG_WARN("init AI column worker failed", K(tmp_ret));
+      } else if (OB_SUCCESS != (tmp_ret = sql::ObAIColumnService::get_instance().start())) {
+        LOG_WARN("start AI column worker failed", K(tmp_ret));
+      }
+    }
     FLOG_INFO("[OBSERVER_NOTICE] observer start service", "start_service_time", GCTX.start_service_time_);
     LOG_DBA_INFO_V2(OB_SERVER_START_SUCCESS,
                     DBA_STEP_INC_INFO(server_start),
@@ -1598,6 +1608,8 @@ int ObServer::stop()
   int fail_ret = OB_SUCCESS;
   FLOG_INFO("[OBSERVER_NOTICE] stop observer begin");
   LOG_DBA_INFO_V2(OB_SERVER_STOP_BEGIN, "observer stop begin.");
+  sql::ObAIColumnService::get_instance().stop();
+  sql::ObAIColumnService::get_instance().wait();
 
   if (in_process_) {
     // DDL retries must observe cancellation while schema and SQL services are still available.

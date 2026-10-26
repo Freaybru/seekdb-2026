@@ -538,6 +538,116 @@ int ObAIColumnDDLUtil::retry_column(const ObString &db_name,
   return ret;
 }
 
+int ObAIColumnDDLUtil::load_column_links(const uint64_t table_id, ObIArray<ObAIColumnDef> &defs)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  if (OB_ISNULL(GCTX.sql_proxy_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(sql.append_fmt("select column_id, state_column_id, request_column_id,"
+                                    " result_spec_column_id, dependent_column_ids, func_type"
+                                    " from oceanbase.__all_ai_column where table_id = %lu",
+                                    table_id))) {
+  } else {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      ObMySQLResult *result = NULL;
+      if (OB_FAIL(GCTX.sql_proxy_->read(res, sql.ptr()))) {
+        LOG_WARN("read ai column metadata failed", K(ret), K(sql));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+      while (OB_SUCC(ret) && OB_SUCC(result->next())) {
+        ObAIColumnDef def;
+        int64_t v = 0;
+        ObString deps;
+        def.table_id_ = table_id;
+        EXTRACT_INT_FIELD_MYSQL(*result, "column_id", v, int64_t);
+        def.column_id_ = static_cast<uint64_t>(v);
+        EXTRACT_INT_FIELD_MYSQL(*result, "state_column_id", v, int64_t);
+        def.state_column_id_ = static_cast<uint64_t>(v);
+        EXTRACT_INT_FIELD_MYSQL(*result, "request_column_id", v, int64_t);
+        def.request_column_id_ = static_cast<uint64_t>(v);
+        EXTRACT_INT_FIELD_MYSQL(*result, "result_spec_column_id", v, int64_t);
+        def.result_spec_column_id_ = static_cast<uint64_t>(v);
+        EXTRACT_INT_FIELD_MYSQL(*result, "func_type", def.func_type_, int64_t);
+        EXTRACT_VARCHAR_FIELD_MYSQL(*result, "dependent_column_ids", deps);
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(def.parse_dependent_ids(deps))) {
+          LOG_WARN("parse dependencies failed", K(ret), K(deps));
+        } else if (OB_FAIL(defs.push_back(def))) {
+        }
+      }
+      if (OB_ITER_END == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+  }
+  return ret;
+}
+
+int ObAIColumnDDLUtil::check_column_ready(const ObString &db_name,
+                                          const ObString &table_name,
+                                          const uint64_t table_id,
+                                          const uint64_t column_id,
+                                          const ObString &column_name)
+{
+  int ret = OB_SUCCESS;
+  ObArenaAllocator alloc("AIColStrict");
+  ObString state_name;
+  ObSqlString sql;
+  if (OB_ISNULL(GCTX.sql_proxy_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(ObAIColumnUtil::build_hidden_column_name(AI_HIDDEN_STATE, column_name, alloc,
+                                                              state_name))) {
+  } else if (OB_FAIL(sql.append("select 1 as c from "))
+             || OB_FAIL(ai_ddl_quote_ident(db_name, sql)) || OB_FAIL(sql.append("."))
+             || OB_FAIL(ai_ddl_quote_ident(table_name, sql)) || OB_FAIL(sql.append(" where "))
+             || OB_FAIL(ai_ddl_quote_ident(state_name, sql)) || OB_FAIL(sql.append(" is null or "))
+             || OB_FAIL(ai_ddl_quote_ident(state_name, sql))
+             || OB_FAIL(sql.append_fmt(" != %d limit 1", AI_ROW_READY))) {
+  } else {
+    bool not_ready = false;
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      ObMySQLResult *result = NULL;
+      if (OB_FAIL(GCTX.sql_proxy_->read(res, sql.ptr()))) {
+        LOG_WARN("strict read check failed", K(ret), K(sql));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_SUCC(result->next())) {
+        not_ready = true;
+      } else if (OB_ITER_END == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+    if (OB_SUCC(ret) && !not_ready) {
+      // a committed-but-not-yet-published task also means "not ready"
+      sql.reuse();
+      if (OB_FAIL(sql.append_fmt("select 1 as c from oceanbase.__all_ai_column_task where"
+                                 " table_id = %lu and column_id = %lu limit 1",
+                                 table_id, column_id))) {
+      } else {
+        SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+          ObMySQLResult *result = NULL;
+          if (OB_FAIL(GCTX.sql_proxy_->read(res, sql.ptr()))) {
+            LOG_WARN("strict read task check failed", K(ret), K(sql));
+          } else if (OB_ISNULL(result = res.get_result())) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (OB_SUCC(result->next())) {
+            not_ready = true;
+          } else if (OB_ITER_END == ret) {
+            ret = OB_SUCCESS;
+          }
+        }
+      }
+    }
+    if (OB_SUCC(ret) && not_ready) {
+      ret = OB_AI_COLUMN_NOT_READY;
+      LOG_USER_ERROR(OB_AI_COLUMN_NOT_READY, table_id, column_id);
+    }
+  }
+  return ret;
+}
+
 int ObAIColumnDDLUtil::cleanup_table(const uint64_t table_id)
 {
   int ret = OB_SUCCESS;

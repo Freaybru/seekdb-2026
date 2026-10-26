@@ -304,6 +304,10 @@ private:
                             const IndexDMLInfo &dml_info,
                             ObDMLBaseCtDef &dml_ctdef);
   int add_trigger_arg(const ObTriggerInfo &trigger_info, ObDMLBaseCtDef &dml_ctdef);
+  int convert_ai_columns(ObLogDelUpd &op,
+                         const IndexDMLInfo &index_dml_info,
+                         ObDMLBaseCtDef &dml_ctdef,
+                         uint64_t dml_event);
   int convert_triggers(ObLogDelUpd &log_op,
                        const IndexDMLInfo &dml_info,
                        ObDMLBaseCtDef &dml_ctdef,
