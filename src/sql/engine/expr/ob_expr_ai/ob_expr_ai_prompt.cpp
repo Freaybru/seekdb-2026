@@ -46,9 +46,9 @@ ObExprAIPrompt::~ObExprAIPrompt()
 
 static bool is_prompt_character_type(const ObExprResType &type)
 {
-  // TEXT/LONGTEXT share the text type class with BLOB. BLOB stays unsupported.
-  return ob_is_string_tc(type.get_type())
-      || (ob_is_text_tc(type.get_type()) && type.get_collation_type() != CS_TYPE_BINARY);
+  // CHAR/VARCHAR/BINARY/VARBINARY and the whole TEXT/BLOB family
+  // (TINY/MEDIUM/LONG) are accepted as prompt templates and arguments.
+  return ob_is_string_tc(type.get_type()) || ob_is_text_tc(type.get_type());
 }
 
 static void set_prompt_character_calc_type(ObExprResType &type)
@@ -57,6 +57,9 @@ static void set_prompt_character_calc_type(ObExprResType &type)
     type.set_calc_type(ObVarcharType);
     type.set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
   } else if (type.get_charset_type() != CHARSET_UTF8MB4) {
+    // Keep the LOB type but convert binary/non-utf8 text to utf8mb4 so the
+    // template and arguments are encoded consistently in the prompt JSON.
+    type.set_calc_type(type.get_type());
     type.set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
   }
 }
