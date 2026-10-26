@@ -19,6 +19,7 @@
 #include "share/ob_rpc_struct.h"
 #include "sql/resolver/ddl/ob_ddl_stmt.h"
 #include "sql/resolver/ddl/ob_partitioned_stmt.h"
+#include "sql/ai_column/ob_ai_column_define.h"
 namespace oceanbase
 {
 namespace sql
@@ -80,8 +81,24 @@ public:
   {
     return index_partition_resolve_results_;
   }
-  TO_STRING_KV(K_(part_type));
+  common::ObIArray<ObAIColumnDef> &get_ai_column_defs() { return ai_column_defs_; }
+  const common::ObIArray<ObAIColumnDef> &get_ai_column_defs() const { return ai_column_defs_; }
+  // ALTER TABLE ... RETRY AI COLUMN c [WHERE ...]
+  bool has_ai_column_retry() const { return has_ai_column_retry_; }
+  void set_ai_column_retry(const common::ObString &column_name, const common::ObString &where_text)
+  {
+    has_ai_column_retry_ = true;
+    ai_retry_column_name_ = column_name;
+    ai_retry_where_text_ = where_text;
+  }
+  const common::ObString &get_ai_retry_column_name() const { return ai_retry_column_name_; }
+  const common::ObString &get_ai_retry_where_text() const { return ai_retry_where_text_; }
+  TO_STRING_KV(K_(part_type), K_(ai_column_defs), K_(has_ai_column_retry));
 private:
+  common::ObSEArray<ObAIColumnDef, 2> ai_column_defs_;
+  bool has_ai_column_retry_ = false;
+  common::ObString ai_retry_column_name_;
+  common::ObString ai_retry_where_text_;
   common::ObSArray<ObPartitionResolveResult> index_partition_resolve_results_;
   share::schema::ObPartitionFuncType part_type_;
 private:

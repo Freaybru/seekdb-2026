@@ -582,6 +582,37 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
             }
             break;
         }
+        case T_ALTER_AI_COLUMN_RETRY: {
+            const ParseNode *name_node = action_node->num_child_ > 0 ? action_node->children_[0] : NULL;
+            const ParseNode *where_node = action_node->num_child_ > 1 ? action_node->children_[1] : NULL;
+            const ObColumnSchemaV2 *ai_col = NULL;
+            ObString col_name;
+            ObString where_text;
+            if (node.num_child_ > 1) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
+            } else if (OB_ISNULL(name_node)) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (FALSE_IT(col_name.assign_ptr(name_node->str_value_,
+                                                    static_cast<int32_t>(name_node->str_len_)))) {
+            } else if (OB_ISNULL(ai_col = table_schema_->get_column_schema(col_name))
+                       || ai_col->is_hidden()) {
+              ret = OB_ERR_BAD_FIELD_ERROR;
+              ObString table_name = table_schema_->get_table_name_str();
+              LOG_USER_ERROR(OB_ERR_BAD_FIELD_ERROR, col_name.length(), col_name.ptr(),
+                             table_name.length(), table_name.ptr());
+            } else if (!ai_col->is_ai_result_column()) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+            } else {
+              if (OB_NOT_NULL(where_node) && OB_NOT_NULL(where_node->str_value_)) {
+                where_text.assign_ptr(where_node->str_value_,
+                                      static_cast<int32_t>(where_node->str_len_));
+              }
+              alter_table_stmt->set_ai_column_retry(ai_col->get_column_name_str(), where_text);
+            }
+            break;
+        }
         case T_MODIFY_ALL_TRIGGERS: {
             alter_table_stmt->set_is_alter_triggers(true);
             if (OB_FAIL(resolve_modify_all_trigger(*action_node))) {
@@ -599,6 +630,36 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
     }
     if (OB_FAIL(ret)) {
     } else if (OB_FAIL(check_skip_index(alter_table_stmt->get_alter_table_arg().alter_table_schema_))) {
+    }
+    // AI columns added by this ALTER: validate and add their hidden columns.
+    if (OB_SUCC(ret) && has_pending_ai_columns()) {
+      AlterTableSchema &ai_alter_schema = alter_table_stmt->get_alter_table_arg().alter_table_schema_;
+      ObSEArray<ObColumnSchemaV2, 6> ai_hidden_cols;
+      if (OB_FAIL(resolve_pending_ai_columns(ai_alter_schema, table_schema_,
+                                             alter_table_stmt->get_ai_column_defs(),
+                                             ai_hidden_cols))) {
+        SQL_RESV_LOG(WARN, "resolve AI columns failed", K(ret));
+      } else if (!table_schema_->is_table_with_pk() || table_schema_->is_heap_organized_table()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN on a table without primary key or a heap-organized table");
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < ai_hidden_cols.count(); ++i) {
+        AlterColumnSchema hidden_alter_col;
+        if (OB_NOT_NULL(table_schema_->get_column_schema(ai_hidden_cols.at(i).get_column_name_str()))) {
+          ret = OB_ERR_COLUMN_DUPLICATE;
+          LOG_USER_ERROR(OB_ERR_COLUMN_DUPLICATE, ai_hidden_cols.at(i).get_column_name_str().length(),
+                         ai_hidden_cols.at(i).get_column_name_str().ptr());
+        } else if (OB_FAIL(hidden_alter_col.assign(ai_hidden_cols.at(i)))) {
+          SQL_RESV_LOG(WARN, "assign failed", K(ret));
+        } else {
+          hidden_alter_col.alter_type_ = OB_DDL_ADD_COLUMN;
+          hidden_alter_col.set_table_id(table_schema_->get_table_id());
+          hidden_alter_col.set_tenant_id(table_schema_->get_tenant_id());
+          if (OB_FAIL(alter_table_stmt->add_column(hidden_alter_col))) {
+            SQL_RESV_LOG(WARN, "add hidden AI column failed", K(ret));
+          }
+        }
+      }
     }
     //deal with drop column affer drop constraint (mysql mode)
     if (OB_SUCC(ret) && drop_col_act_position_list.count() > 0) {

@@ -10988,5 +10988,18 @@
     "info_cn": "是否允许 SQL 直接读写本地文件（文件即数据库）",
     "background_cn": "",
     "ref_url": ""
+  },
+  "ai_column_strict_read": {
+    "id": 10755,
+    "name": "ai_column_strict_read",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "when ON, a statement referencing an AI column fails if any row of that column is not READY",
+    "flags": "GLOBAL | SESSION | NEED_SERIALIZE",
+    "publish_version": "1.0.0.0",
+    "info_cn": "严格读取 AI 列：引用的 AI 列存在未就绪行时报错",
+    "background_cn": "",
+    "ref_url": ""
   }
 }

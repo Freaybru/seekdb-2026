@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "config_bridge.h"
 #include "ob_ddl_resolver.h"
+#include "sql/ai_column/ob_ai_column_resolver_helper.h"
 #include "data_plane/blocksstable/ob_index_block_util.h"
 #include "sql/resolver/dml/ob_dml_resolver.h"
 #include "sql/resolver/ddl/ob_index_builder_util.h"
@@ -1911,7 +1912,11 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
   }
   if (OB_SUCC(ret)) {
     ParseNode *attrs_node = node->children_[2];
-    if (attrs_node != NULL) {
+    bool is_ai_column = false;
+    if (attrs_node != NULL
+        && OB_FAIL(record_ai_column_attr(column, attrs_node, is_modify_column, is_ai_column))) {
+      SQL_RESV_LOG(WARN, "record AI column failed", K(ret));
+    } else if (attrs_node != NULL && !is_ai_column) {
       if (column.is_generated_column()) {
         if (OB_FAIL(resolve_generated_column_attribute(column, attrs_node, resolve_stat))) {
         }
@@ -2055,6 +2060,94 @@ int ObDDLResolver::resolve_normal_column_attribute_constr_default(ObColumnSchema
 }
 
 
+
+int ObDDLResolver::record_ai_column_attr(ObColumnSchemaV2 &column,
+                                         ParseNode *attrs_node,
+                                         const bool is_modify_column,
+                                         bool &is_ai_column)
+{
+  int ret = OB_SUCCESS;
+  is_ai_column = false;
+  const ParseNode *ai_node = NULL;
+  for (int64_t i = 0; OB_NOT_NULL(attrs_node) && i < attrs_node->num_child_; ++i) {
+    if (OB_NOT_NULL(attrs_node->children_[i])
+        && T_AI_COLUMN_ATTR == attrs_node->children_[i]->type_) {
+      ai_node = attrs_node->children_[i];
+    }
+  }
+  if (OB_ISNULL(ai_node)) {
+    // not an AI column
+  } else if (is_modify_column) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "modifying a column into an AI COLUMN");
+  } else if (column.is_generated_column() || column.is_autoincrement()) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN on a generated or auto-increment column");
+  } else if (OB_ISNULL(allocator_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    AIColumnPending pending;
+    ObObj null_value;
+    null_value.set_null();
+    is_ai_column = true;
+    column.add_column_flag(AI_RESULT_COLUMN_FLAG);
+    column.set_nullable(true);
+    column.set_is_hidden(false);
+    pending.attr_node_ = ai_node;
+    bool dup = false;
+    for (int64_t i = 0; i < ai_column_pendings_.count(); ++i) {
+      if (0 == ai_column_pendings_.at(i).column_name_.case_compare(column.get_column_name_str())) {
+        ai_column_pendings_.at(i).attr_node_ = ai_node;
+        dup = true;
+      }
+    }
+    if (OB_FAIL(column.set_cur_default_value(null_value, false))) {
+      SQL_RESV_LOG(WARN, "set default failed", K(ret));
+    } else if (OB_FAIL(column.set_orig_default_value(null_value))) {
+      SQL_RESV_LOG(WARN, "set default failed", K(ret));
+    } else if (dup) {
+    } else if (OB_FAIL(ob_write_string(*allocator_, column.get_column_name_str(),
+                                       pending.column_name_))) {
+      SQL_RESV_LOG(WARN, "copy name failed", K(ret));
+    } else if (OB_FAIL(ai_column_pendings_.push_back(pending))) {
+      SQL_RESV_LOG(WARN, "push back failed", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObDDLResolver::resolve_pending_ai_columns(const ObTableSchema &new_schema,
+                                              const ObTableSchema *base_schema,
+                                              ObIArray<ObAIColumnDef> &defs,
+                                              ObIArray<ObColumnSchemaV2> &hidden_cols)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<ObString, 4> pending_names;
+  for (int64_t i = 0; OB_SUCC(ret) && i < ai_column_pendings_.count(); ++i) {
+    OZ (pending_names.push_back(ai_column_pendings_.at(i).column_name_));
+  }
+  ObAIColumnSchemaLookup lookup(new_schema, base_schema, pending_names);
+  for (int64_t i = 0; OB_SUCC(ret) && i < ai_column_pendings_.count(); ++i) {
+    const AIColumnPending &pending = ai_column_pendings_.at(i);
+    const ObColumnSchemaV2 *column = new_schema.get_column_schema(pending.column_name_);
+    ObAIColumnDef def;
+    if (OB_ISNULL(column) || OB_ISNULL(pending.attr_node_) || OB_ISNULL(allocator_)) {
+      ret = OB_ERR_UNEXPECTED;
+      SQL_RESV_LOG(WARN, "AI column not found in schema", K(ret), K(pending));
+    } else if (OB_FAIL(ObAIColumnResolveHelper::resolve_attr(
+                   *allocator_, *column, *pending.attr_node_, lookup,
+                   OB_NOT_NULL(schema_checker_) ? schema_checker_->get_schema_guard() : NULL,
+                   def))) {
+      SQL_RESV_LOG(WARN, "resolve AI column failed", K(ret), K(pending));
+    } else if (OB_FAIL(ObAIColumnResolveHelper::build_hidden_columns(*allocator_, def, *column,
+                                                                     hidden_cols))) {
+      SQL_RESV_LOG(WARN, "build hidden columns failed", K(ret));
+    } else if (OB_FAIL(defs.push_back(def))) {
+      SQL_RESV_LOG(WARN, "push back failed", K(ret));
+    }
+  }
+  return ret;
+}
 
 int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
                                                    ParseNode *attrs_node,

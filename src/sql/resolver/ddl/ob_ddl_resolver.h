@@ -453,6 +453,16 @@ public:
       ObIAllocator &allocator,
       ObIArray<ObString> &partkey_strs);
 protected:
+  // AI COLUMN support
+  int record_ai_column_attr(share::schema::ObColumnSchemaV2 &column,
+                            ParseNode *attrs_node,
+                            const bool is_modify_column,
+                            bool &is_ai_column);
+  int resolve_pending_ai_columns(const share::schema::ObTableSchema &new_schema,
+                                 const share::schema::ObTableSchema *base_schema,
+                                 common::ObIArray<ObAIColumnDef> &defs,
+                                 common::ObIArray<share::schema::ObColumnSchemaV2> &hidden_cols);
+  bool has_pending_ai_columns() const { return ai_column_pendings_.count() > 0; }
   static int append_vec_hnsw_args(
       const ObPartitionResolveResult &resolve_result,
       const obcall::ObCreateIndexArg &index_arg,
@@ -881,6 +891,14 @@ protected:
   common::ObString vec_column_name_;
   ObIndexType vec_index_type_;
   ObSemiStructEncodingType semistruct_encoding_type_;
+  struct AIColumnPending
+  {
+    AIColumnPending() : column_name_(), attr_node_(NULL) {}
+    TO_STRING_KV(K_(column_name));
+    common::ObString column_name_;
+    const ParseNode *attr_node_;
+  };
+  common::ObSEArray<AIColumnPending, 2> ai_column_pendings_;
 private:
   template <typename STMT>
   DISALLOW_COPY_AND_ASSIGN(ObDDLResolver);

@@ -199,6 +199,8 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline bool is_geometry() const { return meta_type_.is_geometry(); }
   inline bool is_decimal_int() const { return meta_type_.is_decimal_int(); }
   inline bool is_string_lob() const { return column_flags_ & STRING_LOB_COLUMN_FLAG; }
+  inline bool is_ai_result_column() const { return column_flags_ & AI_RESULT_COLUMN_FLAG; }
+  inline bool is_ai_hidden_column() const { return column_flags_ & AI_HIDDEN_COLUMN_FLAG; }
   inline bool is_key_forbid_lob() const { return ob_is_text_tc(meta_type_.get_type()) && !is_string_lob(); }
 
   inline bool is_collection() const { return meta_type_.is_collection_sql_type(); }

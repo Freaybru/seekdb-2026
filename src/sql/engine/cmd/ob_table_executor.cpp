@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
+#include "sql/ai_column/ob_ai_column_ddl.h"
 #include "config_bridge.h"
 #include <inttypes.h>
 #include "common/ob_timeout_ctx.h"
@@ -487,6 +488,11 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
         if (OB_FAIL(ObDDLExecutorUtil::execute_pcreate_table(
             my_session, ctx.root_command_service(), "[parallel create table]",
                                                           create_table_arg, res))) {
+        } else if (stmt.get_ai_column_defs().count() > 0
+                   && OB_FAIL(ObAIColumnDDLUtil::persist_definitions(
+                       stmt.get_database_name(), stmt.get_table_name(),
+                       stmt.get_ai_column_defs(), false, my_session->get_timezone_info()))) {
+          LOG_WARN("persist AI column metadata failed", K(ret));
         }
       }
     } else {
@@ -763,6 +769,17 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
   OV (OB_NOT_NULL(task_exec_ctx = GET_SQL_EXECUTOR_CTX(ctx)), OB_NOT_INIT);
   if (OB_FAIL(ret)) {
     // do nothing
+  } else if (stmt.has_ai_column_retry()) {
+    ObSQLSessionInfo *retry_session = ctx.get_my_session();
+    if (OB_ISNULL(retry_session)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(ObAIColumnDDLUtil::retry_column(
+                   alter_table_arg.alter_table_schema_.get_origin_database_name(),
+                   alter_table_arg.alter_table_schema_.get_origin_table_name(),
+                   stmt.get_ai_retry_column_name(), stmt.get_ai_retry_where_text(),
+                   retry_session->get_timezone_info()))) {
+      LOG_WARN("retry AI column failed", K(ret));
+    }
   } else if (stmt.is_alter_triggers()) {
     if (stmt.get_tg_arg().trigger_infos_.count() > 0) {
       stmt.get_tg_arg().ddl_stmt_str_ = first_stmt;
@@ -866,6 +883,14 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
             res.task_id_, res.ddl_need_retry_at_executor_, my_session,
             *ctx.get_query_runtime_environment(), ctx.local_command_service(), is_support_cancel))) {
         }
+      }
+    }
+    if (OB_SUCC(ret) && stmt.get_ai_column_defs().count() > 0) {
+      if (OB_FAIL(ObAIColumnDDLUtil::persist_definitions(
+              alter_table_arg.alter_table_schema_.get_origin_database_name(),
+              alter_table_arg.alter_table_schema_.get_origin_table_name(),
+              stmt.get_ai_column_defs(), true, my_session->get_timezone_info()))) {
+        LOG_WARN("persist AI column metadata failed", K(ret));
       }
     }
     char table_info_buffer[256];

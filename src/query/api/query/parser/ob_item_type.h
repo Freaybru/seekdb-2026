@@ -2281,6 +2281,10 @@ typedef enum ObItemType
   T_COPY_TO = 4924,                 // COPY (query) | table TO 'path' (options)
   T_COPY_OPTION = 4925,
   T_COPY_OPTION_LIST = 4926,
+  T_AI_COLUMN_ATTR = 4927,          // AI COLUMN (expr) [WITH (options)] column attribute
+  T_AI_COLUMN_OPTION = 4928,        // name = value option of an AI column
+  T_AI_COLUMN_OPTION_LIST = 4929,
+  T_ALTER_AI_COLUMN_RETRY = 4930,   // ALTER TABLE ... RETRY AI COLUMN c [WHERE ...]
   T_MAX //Attention: add a new type before T_MAX
 } ObItemType;
 

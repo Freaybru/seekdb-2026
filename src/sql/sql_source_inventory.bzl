@@ -227,6 +227,9 @@ SQL_UNITY_GROUPS = [
         srcs = [
             "src/sql/engine/basic/ob_topk_op.cpp",
             "src/sql/engine/basic/ob_values_op.cpp",
+            "src/sql/ai_column/ob_ai_column_define.cpp",
+            "src/sql/ai_column/ob_ai_column_resolver_helper.cpp",
+            "src/sql/ai_column/ob_ai_column_ddl.cpp",
             "src/sql/engine/basic/ob_stat_collector_op.cpp",
             "src/sql/engine/basic/chunk_store/ob_chunk_block.cpp",
             "src/sql/engine/basic/chunk_store/ob_compact_store.cpp",

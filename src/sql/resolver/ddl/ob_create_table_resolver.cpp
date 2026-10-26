@@ -950,6 +950,36 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       } else if (OB_FAIL(resolve_primary_key_node_in_heap_table(primary_node_in_heap_table, stats, resolved_cols))) {
       }
     }
+
+    // AI columns: validate definitions, then add their hidden bookkeeping columns.
+    if (OB_SUCC(ret) && RESOLVE_NON_COL != resolve_rule && has_pending_ai_columns()) {
+      ObSEArray<ObColumnSchemaV2, 6> ai_hidden_cols;
+      if (OB_FAIL(resolve_pending_ai_columns(table_schema, NULL,
+                                             create_table_stmt->get_ai_column_defs(),
+                                             ai_hidden_cols))) {
+        SQL_RESV_LOG(WARN, "resolve AI columns failed", K(ret));
+      } else if (get_primary_key_size() <= 0 || is_organization_set_to_heap()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI COLUMN on a table without primary key or a heap-organized table");
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < ai_hidden_cols.count(); ++i) {
+        ObColumnSchemaV2 &hidden_col = ai_hidden_cols.at(i);
+        hidden_col.set_column_id(gen_column_id());
+        ObColumnNameHashWrapper name_key(hidden_col.get_column_name_str());
+        if (OB_HASH_EXIST == column_name_set_.exist_refactored(name_key)) {
+          ret = OB_ERR_COLUMN_DUPLICATE;
+          LOG_USER_ERROR(OB_ERR_COLUMN_DUPLICATE, hidden_col.get_column_name_str().length(),
+                         hidden_col.get_column_name_str().ptr());
+        } else if (OB_FAIL(table_schema.add_column(hidden_col))) {
+          SQL_RESV_LOG(WARN, "add AI hidden column failed", K(ret));
+        } else if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
+          SQL_RESV_LOG(WARN, "set name failed", K(ret));
+        }
+      }
+      if (OB_SUCC(ret)) {
+        table_schema.set_max_used_column_id(cur_column_id_);
+      }
+    }
   }
   return ret;
 }

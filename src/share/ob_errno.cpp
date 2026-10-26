@@ -10809,6 +10809,13 @@ static const _error _error_OB_AI_FUNC_MODEL_EXISTS = {
       .str_error             = "This ai model is already exists",
       .str_user_error        = "This ai model \'%.*s\' is already exists"
 };
+static const _error _error_OB_AI_COLUMN_NOT_READY = {
+      .error_name            = "OB_AI_COLUMN_NOT_READY",
+      .mysql_errno           = -1,
+      .sqlstate              = "HY000",
+      .str_error             = "AI column has unfinished tasks",
+      .str_user_error        = "AI column has unfinished tasks for table_id=%lu, column_id=%lu"
+};
 static const _error _error_OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN = {
       .error_name            = "OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN",
       .mysql_errno           = -1,
@@ -12392,6 +12399,7 @@ struct ObStrErrorInit
     _errors[-OB_AI_FUNC_PARAM_TYPE_INVALID] = &_error_OB_AI_FUNC_PARAM_TYPE_INVALID;
     _errors[-OB_AI_FUNC_MODEL_NOT_FOUND] = &_error_OB_AI_FUNC_MODEL_NOT_FOUND;
     _errors[-OB_AI_FUNC_MODEL_EXISTS] = &_error_OB_AI_FUNC_MODEL_EXISTS;
+    _errors[-OB_AI_COLUMN_NOT_READY] = &_error_OB_AI_COLUMN_NOT_READY;
     _errors[-OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN] = &_error_OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN;
     _errors[-OB_ERR_UPDATE_TWICE] = &_error_OB_ERR_UPDATE_TWICE;
     _errors[-OB_ERR_SNAPSHOT_QUERY_WITH_UPDATE] = &_error_OB_ERR_SNAPSHOT_QUERY_WITH_UPDATE;
