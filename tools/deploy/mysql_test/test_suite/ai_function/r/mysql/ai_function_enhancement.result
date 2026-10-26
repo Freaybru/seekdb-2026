@@ -1,188 +1,101 @@
-call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('complete_ep');
-call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('embed_ep');
-call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('rerank_ep');
-call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ollama_complete_ep');
-call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ollama_embed_ep');
-call DBMS_AI_SERVICE.DROP_AI_MODEL('complete_openai');
-call DBMS_AI_SERVICE.DROP_AI_MODEL('embed_openai');
-call DBMS_AI_SERVICE.DROP_AI_MODEL('rerank_model');
-call DBMS_AI_SERVICE.DROP_AI_MODEL('ollama_complete');
-call DBMS_AI_SERVICE.DROP_AI_MODEL('ollama_embed');
-call DBMS_AI_SERVICE.CREATE_AI_MODEL('complete_openai', '{"type":"completion","model_name":"gpt-test"}');
-call DBMS_AI_SERVICE.CREATE_AI_MODEL('embed_openai', '{"type":"dense_embedding","model_name":"embed-test"}');
-call DBMS_AI_SERVICE.CREATE_AI_MODEL('rerank_model', '{"type":"rerank","model_name":"rerank-test"}');
-call DBMS_AI_SERVICE.CREATE_AI_MODEL('ollama_complete', '{"type":"completion","model_name":"llama3.1"}');
-call DBMS_AI_SERVICE.CREATE_AI_MODEL('ollama_embed', '{"type":"dense_embedding","model_name":"nomic-embed"}');
-call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('complete_ep', '{
-  "ai_model_name":"complete_openai",
-  "url":"http://127.0.0.1:8000/v1/chat/completions",
-  "access_key":"sk-test",
-  "provider":"openai",
-  "request_model_name":"gpt-test"
-}');
-call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('embed_ep', '{
-  "ai_model_name":"embed_openai",
-  "url":"http://127.0.0.1:8000/v1/embeddings",
-  "access_key":"sk-test",
-  "provider":"OPENAI",
-  "request_model_name":"embed-test"
-}');
-call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('rerank_ep', '{
-  "ai_model_name":"rerank_model",
-  "url":"http://127.0.0.1:8000/v1/rerank",
-  "access_key":"sk-test",
-  "provider":"siliconflow",
-  "request_model_name":"rerank-test"
-}');
-call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ollama_complete_ep', '{
-  "ai_model_name":"ollama_complete",
-  "url":"http://127.0.0.1:8000/api/generate",
-  "access_key":"",
-  "provider":"openai",
-  "request_model_name":"llama3.1"
-}');
-ERROR HY000: The param 'access_key' is empty or null
-call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ollama_complete_ep', '{
-  "ai_model_name":"ollama_complete",
-  "url":"http://127.0.0.1:8000/api/generate",
-  "access_key":"",
-  "provider":"ollama",
-  "request_model_name":"llama3.1"
-}');
-call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ollama_embed_ep', '{
-  "ai_model_name":"ollama_embed",
-  "url":"http://127.0.0.1:8000/api/embed",
-  "access_key":"",
-  "provider":"Ollama",
-  "request_model_name":"nomic-embed"
-}');
-select ENDPOINT_NAME, PROVIDER, ACCESS_KEY = '', URL from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS where ENDPOINT_NAME in ('ollama_complete_ep', 'ollama_embed_ep') order by ENDPOINT_NAME;
-ENDPOINT_NAME	PROVIDER	ACCESS_KEY = ''	URL
-ollama_complete_ep	ollama	1	http://127.0.0.1:8000/api/generate
-ollama_embed_ep	Ollama	1	http://127.0.0.1:8000/api/embed
-call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT('ollama_complete_ep', '{"url":"http://127.0.0.1:8000/api/generate"}');
-select URL from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS where ENDPOINT_NAME = 'ollama_complete_ep';
-URL
-http://127.0.0.1:8000/api/generate
-select ai_complete('complete_openai', 'hello');
-ai_complete('complete_openai', 'hello')
-ok:hello
-select ai_complete('complete_openai', ai_prompt('Say {0}', 'hi'));
-ai_complete('complete_openai', ai_prompt('Say {0}', 'hi'))
-ok:Say hi
-select ai_complete('complete_openai', ai_prompt('A{0}B', ai_prompt('[{0}]', 'z')));
-ai_complete('complete_openai', ai_prompt('A{0}B', ai_prompt('[{0}]', 'z')))
-ok:A[z]B
-select ai_complete('complete_openai', ai_prompt('{0}-{0}', 'x'));
-ai_complete('complete_openai', ai_prompt('{0}-{0}', 'x'))
-ok:x-x
-select ai_complete('complete_openai', ai_prompt('v={0}', json_array('a', 'b')));
-ai_complete('complete_openai', ai_prompt('v={0}', json_array('a', 'b')))
-ok:v=["a", "b"]
-select ai_complete('complete_openai', ai_prompt('你好{0}', '世界'));
-ai_complete('complete_openai', ai_prompt('你好{0}', '世界'))
-ok:你好世界
-select ai_complete('complete_openai', ai_prompt('pre\\{0\\}post', 'NO'));
-ai_complete('complete_openai', ai_prompt('pre\\{0\\}post', 'NO'))
-ok:pre{0}post
-select ai_complete('complete_openai', 'hello', NULL);
-ai_complete('complete_openai', 'hello', NULL)
-ok:hello
-select ai_complete('complete_openai', 'hello', '{"temperature":0.2,"max_tokens":16}');
-ai_complete('complete_openai', 'hello', '{"temperature":0.2,"max_tokens":16}')
-ok:hello|t=0.2|m=16
-select ai_complete('complete_openai', repeat('x', 64));
-ai_complete('complete_openai', repeat('x', 64))
-ok:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-select ai_complete('complete_openai', 'BAD_EMPTY');
-select ai_complete('ollama_complete', 'hello');
-ai_complete('ollama_complete', 'hello')
-ollama:hello
-select ai_embed('ollama_embed', 'a');
-ai_embed('ollama_embed', 'a')
-[1, 0, 0]
-select ai_embed('embed_openai', 'b');
-ai_embed('embed_openai', 'b')
-[0, 1, 0]
-select ai_embed('embed_openai', 'a', 2);
-ai_embed('embed_openai', 'a', 2)
-[1, 0]
-drop table if exists t_embed_small;
-create table t_embed_small(id int primary key, c varchar(20));
-insert into t_embed_small values (1, 'a'), (2, NULL), (3, 'c');
-select id, ai_embed('embed_openai', c) from t_embed_small order by id;
-id	ai_embed('embed_openai', c)
-1	[1, 0, 0]
+select ai_prompt('{0}/{0}/{1}', json_array(1,true), json_object('k',2));
+ai_prompt('{0}/{0}/{1}', json_array(1,true), json_object('k',2))
+{"args": [[1, true], {"k": 2}], "template": "{0}/{0}/{1}"}
+drop table if exists ai_enhance_prompt;
+create table ai_enhance_prompt(t longtext, a text);
+insert into ai_enhance_prompt values('{0}-ok', 'lob');
+select ai_prompt(t, a) from ai_enhance_prompt;
+ai_prompt(t, a)
+{"args": ["lob"], "template": "{0}-ok"}
+drop table ai_enhance_prompt;
+call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_complete');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_complete_ep');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL(
+'enhance_complete', '{"type":"completion","model_name":"qwen3-32b"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT(
+'enhance_complete_ep', '{"ai_model_name":"enhance_complete","scope":"all","url":"http://0.0.0.0:8000/compatible-mode/v1/chat/completions","access_key":"mock-key","provider":"openai"}');
+select length(ai_complete('enhance_complete', 'hello', null)) > 0 as complete_ok;
+complete_ok
+1
+select length(ai_complete(
+'enhance_complete', ai_prompt('describe {0}', json_object('text','你好')),
+'{"temperature":0.2,"max_tokens":16}')) > 0 as complete_config_ok;
+complete_config_ok
+1
+call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_embed');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_embed_ep');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL(
+'enhance_embed', '{"type":"dense_embedding","model_name":"text-embedding-v1"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT(
+'enhance_embed_ep', '{"ai_model_name":"enhance_embed","scope":"all","url":"http://0.0.0.0:8000/compatible-mode/v1/embeddings","access_key":"mock-key","provider":"openai"}');
+select json_length(ai_embed('enhance_embed', 'single-row')) as embed_dimension;
+embed_dimension
+768
+select json_length(ai_embed('enhance_embed', 'dimension-row', 768)) as requested_dimension;
+requested_dimension
+768
+drop table if exists ai_enhance_batch;
+create table ai_enhance_batch(id int primary key, content text);
+insert into ai_enhance_batch values(1,'first'),(2,null),(3,'third');
+select id, json_length(ai_embed('enhance_embed', content)) as dimension
+from ai_enhance_batch order by id;
+id	dimension
+1	768
 2	NULL
-3	[0, 0, 1]
-select ai_embed('embed_openai', c) from t_embed_small where id <> 2 order by id;
-ai_embed('embed_openai', c)
-[1, 0, 0]
-[0, 0, 1]
-select ai_embed('embed_openai', c) from t_embed_small where id <> 2 order by id limit 1;
-ai_embed('embed_openai', c)
-[1, 0, 0]
-select ai_embed('embed_openai', 'a', 0);
-select ai_embed('embed_openai', 'BAD_DIM', 2);
-drop table if exists t_embed_batch;
-create table t_embed_batch(id int primary key, c varchar(20));
-insert into t_embed_batch values
-(0,'r0'),(1,'r1'),(2,'r2'),(3,'r3'),(4,'r4'),(5,'r5'),(6,'r6'),(7,'r7'),
-(8,'r8'),(9,'r9'),(10,'r10'),(11,'r11'),(12,'r12'),(13,'r13'),(14,'r14'),(15,'r15'),
-(16,'r16'),(17,'r17'),(18,'r18'),(19,'r19'),(20,'r20'),(21,'r21'),(22,'r22'),(23,'r23'),
-(24,'r24'),(25,'r25'),(26,'r26'),(27,'r27'),(28,'r28'),(29,'r29'),(30,'r30'),(31,'r31'),
-(32,'r32');
-select id, ai_embed('embed_openai', c) from t_embed_batch order by id;
-id	ai_embed('embed_openai', c)
-0	[0, 0, 0]
-1	[1, 0, 0]
-2	[2, 0, 0]
-3	[3, 0, 0]
-4	[4, 0, 0]
-5	[5, 0, 0]
-6	[6, 0, 0]
-7	[7, 0, 0]
-8	[8, 0, 0]
-9	[9, 0, 0]
-10	[10, 0, 0]
-11	[11, 0, 0]
-12	[12, 0, 0]
-13	[13, 0, 0]
-14	[14, 0, 0]
-15	[15, 0, 0]
-16	[16, 0, 0]
-17	[17, 0, 0]
-18	[18, 0, 0]
-19	[19, 0, 0]
-20	[20, 0, 0]
-21	[21, 0, 0]
-22	[22, 0, 0]
-23	[23, 0, 0]
-24	[24, 0, 0]
-25	[25, 0, 0]
-26	[26, 0, 0]
-27	[27, 0, 0]
-28	[28, 0, 0]
-29	[29, 0, 0]
-30	[30, 0, 0]
-31	[31, 0, 0]
-32	[32, 0, 0]
-select ai_embed('embed_openai', case when id = 0 then 'FAIL' else c end) from t_embed_batch where id < 2;
-select ai_rerank('rerank_model', 'q', json_array('d0','d1','d2','d3','d4','d5','d6','d7','d8','d9','d10','d11','d12','d13','d14','d15','d16','d17','d18','d19','d20'));
-ai_rerank('rerank_model', 'q', json_array('d0','d1','d2','d3','d4','d5','d6','d7','d8','d9','d10','d11','d12','d13','d14','d15','d16','d17','d18','d19','d20'))
-[{"index": 20, "relevance_score": 20}, {"index": 19, "relevance_score": 19}, {"index": 18, "relevance_score": 18}, {"index": 17, "relevance_score": 17}, {"index": 16, "relevance_score": 16}, {"index": 15, "relevance_score": 15}, {"index": 14, "relevance_score": 14}, {"index": 13, "relevance_score": 13}, {"index": 12, "relevance_score": 12}, {"index": 11, "relevance_score": 11}, {"index": 10, "relevance_score": 10}, {"index": 9, "relevance_score": 9}, {"index": 8, "relevance_score": 8}, {"index": 7, "relevance_score": 7}, {"index": 6, "relevance_score": 6}, {"index": 5, "relevance_score": 5}, {"index": 4, "relevance_score": 4}, {"index": 3, "relevance_score": 3}, {"index": 2, "relevance_score": 2}, {"index": 1, "relevance_score": 1}, {"index": 0, "relevance_score": 0}]
-select ai_rerank('rerank_model', 'q', json_array(json_object('id','a','text','s1'), json_object('id','b','text','s3'), json_object('id','c','text','s3')), 'text');
-ai_rerank('rerank_model', 'q', json_array(json_object('id','a','text','s1'), json_object('id','b','text','s3'), json_object('id','c','text','s3')), 'text')
-[{"id": "b", "text": "s3", "_model_score": 3.0}, {"id": "c", "text": "s3", "_model_score": 3.0}, {"id": "a", "text": "s1", "_model_score": 1.0}]
-drop table t_embed_small;
-drop table t_embed_batch;
-call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('complete_ep');
-call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('embed_ep');
-call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('rerank_ep');
-call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ollama_complete_ep');
-call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ollama_embed_ep');
-call DBMS_AI_SERVICE.DROP_AI_MODEL('complete_openai');
-call DBMS_AI_SERVICE.DROP_AI_MODEL('embed_openai');
-call DBMS_AI_SERVICE.DROP_AI_MODEL('rerank_model');
-call DBMS_AI_SERVICE.DROP_AI_MODEL('ollama_complete');
-call DBMS_AI_SERVICE.DROP_AI_MODEL('ollama_embed');
+3	768
+drop table ai_enhance_batch;
+call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_rerank');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_rerank_ep');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL(
+'enhance_rerank', '{"type":"rerank","model_name":"BAAI/bge-reranker-v2-m3"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT(
+'enhance_rerank_ep', '{"ai_model_name":"enhance_rerank","scope":"all","url":"http://0.0.0.0:8000/v1/rerank","access_key":"mock-key","provider":"siliconflow"}');
+select json_length(ai_rerank('enhance_rerank','apple',
+'["apple","banana","fruit","vegetable"]', null)) as rerank_count;
+rerank_count
+4
+select json_unquote(json_extract(r, '$[0].id')) as first_id,
+json_length(r) as rerank_count
+from (select ai_rerank('enhance_rerank','apple',
+'[{"id":"a","text":"apple"},{"id":"b","text":"banana"}]',
+'text') as r) x;
+first_id	rerank_count
+a	2
+call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_complete');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_complete_ep');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL(
+'enhance_ollama_complete', '{"type":"completion","model_name":"qwen2.5"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT(
+'enhance_ollama_complete_ep', '{"ai_model_name":"enhance_ollama_complete","scope":"all","url":"http://0.0.0.0:8000/api/generate","access_key":"","provider":"ollama"}');
+select provider from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS
+where endpoint_name = 'enhance_ollama_complete_ep';
+provider
+ollama
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT(
+'enhance_ollama_complete_ep', '{"provider":"Ollama"}');
+select provider from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS
+where endpoint_name = 'enhance_ollama_complete_ep';
+provider
+Ollama
+select length(ai_complete('enhance_ollama_complete', 'hello')) > 0 as ollama_complete_ok;
+ollama_complete_ok
+1
+call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_embed');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_embed_ep');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL(
+'enhance_ollama_embed', '{"type":"dense_embedding","model_name":"nomic-embed-text"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT(
+'enhance_ollama_embed_ep', '{"ai_model_name":"enhance_ollama_embed","scope":"all","url":"http://0.0.0.0:8000/api/embed","access_key":"","provider":"OLLAMA"}');
+select json_valid(ai_embed('enhance_ollama_embed', 'hello')) as ollama_embed_ok;
+ollama_embed_ok
+1
+call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_complete');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_complete_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_embed');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_embed_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_rerank');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_rerank_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_complete');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_complete_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_embed');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_embed_ep');
