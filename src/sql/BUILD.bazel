@@ -445,7 +445,7 @@ cc_library(
     ] + _SQL_INTERFACE_NATIVE_DEPS,
     tags = ["manual"],
     visibility = [
-        "//unittest/share/schema:__pkg__",
+        "//unittest/sql/ai_column:__pkg__",
         "//unittest/sql/resolver:__pkg__",
     ],
 )
