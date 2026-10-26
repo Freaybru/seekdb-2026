@@ -45,6 +45,10 @@ class ObLogValuesTableAccess : public ObLogicalOperator
     virtual int get_plan_item_info(PlanText &plan_text, ObSqlPlanItem &plan_item) override;
     int mark_probably_local_exprs();
     int allocate_dummy_output();
+    // rows are streamed from a local file (read_csv/read_json/read_parquet)
+    bool is_file_table() const
+    { return NULL != table_def_ && table_def_->is_file_table_
+             && ObValuesTableDef::ACCESS_FILE == table_def_->access_type_; }
     
     const common::ObIArray<ObColumnRefRawExpr *> &get_column_exprs() const { return column_exprs_; }
     common::ObIArray<ObColumnRefRawExpr *> &get_column_exprs() { return column_exprs_; }

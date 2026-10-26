@@ -35,6 +35,7 @@
 #include "sql/rewrite/ob_transform_utils.h"
 #include "sql/optimizer/ob_del_upd_log_plan.h"
 #include "sql/engine/px/p2p_datahub/ob_p2p_dh_mgr.h"
+#include "sql/optimizer/ob_log_values_table_access.h"
 
 
 using namespace oceanbase::sql;
@@ -3030,13 +3031,19 @@ int ObLogicalOperator::project_pruning_pre()
   int ret = OB_SUCCESS;
   // delete exprs who appeared in current op's output_exprs
   // but not used by it's parent's output_exprs_
+  const bool is_file_table_access = (LOG_VALUES_TABLE_ACCESS == type_
+                                     && static_cast<ObLogValuesTableAccess*>(this)->is_file_table());
   if (NULL != parent_ && !is_plan_root() &&
       LOG_EXPR_VALUES != type_ &&
-      LOG_VALUES_TABLE_ACCESS != type_) {
+      (LOG_VALUES_TABLE_ACCESS != type_ || is_file_table_access)) {
     PPDeps deps;
     if (OB_FAIL(parent_->check_output_dependance(get_output_exprs(), deps))) {
     } else {
       do_project_pruning(get_output_exprs(), deps);
+      // a file scan only decodes the columns it outputs; keep at least one output column
+      if (is_file_table_access && get_output_exprs().empty()
+          && OB_FAIL(static_cast<ObLogValuesTableAccess*>(this)->allocate_dummy_output())) {
+      }
     }
   } else { /* do nothing */ }
 

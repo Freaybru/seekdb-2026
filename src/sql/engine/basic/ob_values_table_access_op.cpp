@@ -32,13 +32,105 @@ OB_SERIALIZE_MEMBER_INHERIT(ObValuesTableAccessSpec,
                             value_exprs_,
                             start_param_idx_,
                             end_param_idx_,
-                            obj_params_);
+                            obj_params_,
+                            file_path_,
+                            file_func_,
+                            file_options_,
+                            file_columns_,
+                            file_identity_,
+                            file_needed_);
 
 ObValuesTableAccessOp::ObValuesTableAccessOp(ObExecContext &exec_ctx,
                                              const ObOpSpec &spec,
                                              ObOpInput *input)
   : ObOperator(exec_ctx, spec, input), datum_caster_(), cm_(CM_NONE),
-    row_idx_(0), row_cnt_(0) {}
+    row_idx_(0), row_cnt_(0), file_scanner_(NULL) {}
+
+void ObValuesTableAccessOp::destroy()
+{
+  if (NULL != file_scanner_) {
+    file_scanner_->~ObFileRowScanner();
+    file_scanner_ = NULL;
+  }
+  ObOperator::destroy();
+}
+
+int ObValuesTableAccessOp::open_file_scanner()
+{
+  int ret = OB_SUCCESS;
+  if (NULL == file_scanner_) {
+    void *buf = NULL;
+    if (OB_ISNULL(buf = ctx_.get_allocator().alloc(sizeof(ObFileRowScanner)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      file_scanner_ = new (buf) ObFileRowScanner(ctx_.get_allocator());
+    }
+  } else {
+    file_scanner_->close();
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_UNLIKELY(MY_SPEC.file_columns_.count() != MY_SPEC.column_exprs_.count()
+                    || MY_SPEC.file_needed_.count() != MY_SPEC.column_exprs_.count())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("file column count mismatch", K(ret), K(MY_SPEC.file_columns_.count()),
+               K(MY_SPEC.column_exprs_.count()));
+    } else if (OB_FAIL(file_scanner_->open(MY_SPEC.file_path_.ptr(), MY_SPEC.file_options_,
+                                           MY_SPEC.file_columns_, &MY_SPEC.file_identity_,
+                                           &MY_SPEC.file_needed_))) {
+      LOG_WARN("failed to open file scanner", K(ret), K(MY_SPEC.file_path_));
+      ret = ObFileSqlErrorReporter::report(ret, MY_SPEC.file_func_, MY_SPEC.file_path_,
+                                           file_scanner_->error_info());
+    }
+  }
+  return ret;
+}
+
+int ObValuesTableAccessOp::calc_next_file_row()
+{
+  int ret = OB_SUCCESS;
+  const int64_t col_num = MY_SPEC.column_exprs_.count();
+  if (OB_ISNULL(file_scanner_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(file_scanner_->get_next_row())) {
+    if (OB_ITER_END != ret) {
+      LOG_WARN("failed to read next file row", K(ret), K(MY_SPEC.file_path_));
+      ret = ObFileSqlErrorReporter::report(ret, MY_SPEC.file_func_, MY_SPEC.file_path_,
+                                           file_scanner_->error_info());
+    }
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < col_num; ++i) {
+    if (!MY_SPEC.file_needed_.at(i)) {
+      continue;
+    }
+    ObExpr *col_expr = MY_SPEC.column_exprs_.at(i);
+    const ObFileCell &cell = file_scanner_->cell(i);
+    ObDatum &datum = col_expr->locate_datum_for_write(eval_ctx_);
+    if (cell.is_null_) {
+      datum.set_null();
+    } else {
+      switch (MY_SPEC.file_columns_.at(i).type_) {
+        case FILE_COL_BOOLEAN:
+        case FILE_COL_BIGINT:
+          datum.set_int(cell.int_);
+          break;
+        case FILE_COL_DOUBLE:
+          datum.set_double(cell.double_);
+          break;
+        case FILE_COL_DATE:
+          datum.set_date(static_cast<int32_t>(cell.int_));
+          break;
+        case FILE_COL_DATETIME:
+          datum.set_datetime(cell.int_);
+          break;
+        default:
+          datum.set_string(cell.str_.ptr(), cell.str_.length());
+          break;
+      }
+    }
+    col_expr->set_evaluated_projected(eval_ctx_);
+  }
+  return ret;
+}
 
 int ObValuesTableAccessOp::inner_open()
 {
@@ -71,6 +163,10 @@ int ObValuesTableAccessOp::inner_open()
       } else if (ObValuesTableDef::ACCESS_OBJ == MY_SPEC.access_type_) {
         int64_t column_cnt = MY_SPEC.column_exprs_.count();
         row_cnt_ = MY_SPEC.obj_params_.count() / column_cnt;
+      } else if (ObValuesTableDef::ACCESS_FILE == MY_SPEC.access_type_) {
+        row_cnt_ = INT64_MAX;  // streamed, the scanner reports the end
+        if (OB_FAIL(open_file_scanner())) {
+        }
       } else {
         int64_t column_cnt = MY_SPEC.column_exprs_.count();
         row_cnt_ = MY_SPEC.value_exprs_.count() / column_cnt;
@@ -86,6 +182,15 @@ int ObValuesTableAccessOp::inner_rescan()
   if (OB_FAIL(ObOperator::inner_rescan())) {
   } else {
     row_idx_ = 0;
+    if (ObValuesTableDef::ACCESS_FILE == MY_SPEC.access_type_) {
+      if (NULL == file_scanner_) {
+        ret = open_file_scanner();
+      } else if (OB_FAIL(file_scanner_->rescan())) {
+        LOG_WARN("failed to rescan file", K(ret));
+        ret = ObFileSqlErrorReporter::report(ret, MY_SPEC.file_func_, MY_SPEC.file_path_,
+                                             file_scanner_->error_info());
+      }
+    }
   }
   return ret;
 }
@@ -96,6 +201,11 @@ int ObValuesTableAccessOp::switch_iterator()
   if (OB_FAIL(ObOperator::inner_switch_iterator())) {
   } else {
     row_idx_ = 0;
+    if (ObValuesTableDef::ACCESS_FILE == MY_SPEC.access_type_ && NULL != file_scanner_
+        && OB_FAIL(file_scanner_->rescan())) {
+      ret = ObFileSqlErrorReporter::report(ret, MY_SPEC.file_func_, MY_SPEC.file_path_,
+                                           file_scanner_->error_info());
+    }
   }
   return ret;
 }
@@ -268,6 +378,8 @@ OB_INLINE int ObValuesTableAccessOp::calc_next_row()
   ObPhysicalPlanCtx *plan_ctx = GET_PHY_PLAN_CTX(ctx_);
   if (row_idx_ == row_cnt_) {
     ret = OB_ITER_END;
+  } else if (ObValuesTableDef::ACCESS_FILE == MY_SPEC.access_type_
+             && OB_FAIL(calc_next_file_row())) {
   } else if (ObValuesTableDef::FOLD_ACCESS_EXPR == MY_SPEC.access_type_ &&
              OB_FAIL(plan_ctx->replace_batch_param_datum(row_idx_,
                                           MY_SPEC.start_param_idx_,
@@ -304,6 +416,10 @@ OB_INLINE int ObValuesTableAccessOp::calc_next_row()
           }
           break;
         }
+        default: {
+          // ACCESS_FILE: already filled by calc_next_file_row()
+          break;
+        }
       };
       col_idx++;
     } // while end
@@ -328,6 +444,9 @@ int ObValuesTableAccessOp::inner_close()
 {
   int ret = OB_SUCCESS;
   row_idx_ = 0;
+  if (NULL != file_scanner_) {
+    file_scanner_->close();
+  }
   if (OB_FAIL(datum_caster_.destroy())) {
   }
   return ret;

@@ -19,6 +19,7 @@
 
 #include "sql/engine/ob_operator.h"
 #include "sql/engine/expr/ob_datum_cast.h"
+#include "sql/engine/basic/ob_file_scan_utils.h"
 
 namespace oceanbase
 {
@@ -32,14 +33,24 @@ class ObValuesTableAccessSpec : public ObOpSpec
 public:
   ObValuesTableAccessSpec(common::ObIAllocator &alloc, const ObPhyOperatorType type)
     : ObOpSpec(alloc, type), access_type_(ObValuesTableDef::ACCESS_EXPR), column_exprs_(alloc),
-      value_exprs_(alloc), start_param_idx_(-1), end_param_idx_(-1), obj_params_(alloc) {}
-  INHERIT_TO_STRING_KV("op_spec", ObOpSpec, K_(access_type));
+      value_exprs_(alloc), start_param_idx_(-1), end_param_idx_(-1), obj_params_(alloc),
+      file_path_(), file_func_(), file_options_(), file_columns_(alloc), file_identity_(),
+      file_needed_(alloc) {}
+  INHERIT_TO_STRING_KV("op_spec", ObOpSpec, K_(access_type), K_(file_path), K_(file_func),
+                       K_(file_options), K_(file_identity));
   ObValuesTableDef::TableAccessType access_type_;
   common::ObFixedArray<ObExpr *, common::ObIAllocator> column_exprs_;
   common::ObFixedArray<ObExpr *, common::ObIAllocator> value_exprs_;
   int64_t start_param_idx_;
   int64_t end_param_idx_;
   common::ObFixedArray<ObObj, common::ObIAllocator> obj_params_;
+  // ACCESS_FILE: everything needed to stream rows from a local file
+  common::ObString file_path_;      // real path checked against secure_file_priv at resolve time
+  common::ObString file_func_;
+  ObFileScanOptions file_options_;
+  common::ObFixedArray<ObFileColumnDesc, common::ObIAllocator> file_columns_;
+  ObFileIdentity file_identity_;    // the file must not change between resolve and scan
+  common::ObFixedArray<bool, common::ObIAllocator> file_needed_;  // columns that must be decoded
 private:
   DISALLOW_COPY_AND_ASSIGN(ObValuesTableAccessSpec);
 };
@@ -53,9 +64,11 @@ public:
   virtual int switch_iterator() override;
   virtual int inner_get_next_row() override;
   virtual int inner_close() override;
-  virtual void destroy() override { ObOperator::destroy(); }
+  virtual void destroy() override;
 private:
   int calc_next_row();
+  int open_file_scanner();
+  int calc_next_file_row();
   int calc_datum_from_expr(const int64_t col_idx,
                            const int64_t row_idx,
                            ObExpr *src_expr,
@@ -76,6 +89,7 @@ private:
   common::ObCastMode cm_;
   int64_t row_idx_;
   int64_t row_cnt_;
+  ObFileRowScanner *file_scanner_;
 };
 
 } // end namespace sql

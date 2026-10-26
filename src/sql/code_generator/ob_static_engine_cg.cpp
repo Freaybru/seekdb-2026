@@ -1733,6 +1733,37 @@ int ObStaticEngineCG::generate_spec(ObLogValuesTableAccess &op,
                                  spec.obj_params_.at(i)))) {
         }
       }
+      if (OB_SUCC(ret) && ObValuesTableDef::ACCESS_FILE == table_def->access_type_) {
+        // only decode the columns used by this operator's output or filters
+        const ObFileTableInfo *info = table_def->file_info_;
+        ObSEArray<ObRawExpr *, 16> used_exprs;
+        ObSEArray<ObRawExpr *, 16> used_columns;
+        if (OB_ISNULL(info) || OB_UNLIKELY(info->columns_.count() != op.get_column_exprs().count())) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("invalid file table def", K(ret), KP(info), K(op.get_column_exprs().count()));
+        } else if (OB_FAIL(append(used_exprs, op.get_output_exprs()))) {
+        } else if (OB_FAIL(append(used_exprs, op.get_filter_exprs()))) {
+        } else if (OB_FAIL(ObRawExprUtils::extract_column_exprs(used_exprs, used_columns))) {
+        } else if (OB_FAIL(ob_write_string(allocator, info->path_, spec.file_path_, true))) {
+        } else if (OB_FAIL(ob_write_string(allocator, info->func_name_, spec.file_func_))) {
+        } else if (OB_FAIL(spec.file_options_.deep_copy(info->options_, allocator))) {
+        } else if (OB_FAIL(spec.file_columns_.prepare_allocate(info->columns_.count()))) {
+        } else if (OB_FAIL(spec.file_needed_.prepare_allocate(info->columns_.count()))) {
+        } else {
+          spec.file_identity_ = info->identity_;
+          for (int64_t i = 0; OB_SUCC(ret) && i < info->columns_.count(); ++i) {
+            if (OB_ISNULL(op.get_column_exprs().at(i))
+                || OB_UNLIKELY(op.get_column_exprs().at(i)->get_column_id() != OB_APP_MIN_COLUMN_ID + i)) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("file table column exprs are not in file order", K(ret), K(i));
+            } else if (OB_FAIL(spec.file_columns_.at(i).deep_copy(info->columns_.at(i), allocator))) {
+            } else {
+              spec.file_needed_.at(i) = ObOptimizerUtil::find_item(used_columns,
+                                                                   op.get_column_exprs().at(i));
+            }
+          }
+        }
+      }
       if (OB_FAIL(ret)) {
       } else if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs()))) {
       } else {

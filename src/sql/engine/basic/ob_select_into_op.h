@@ -23,6 +23,7 @@
 #include "sql/engine/basic/ob_select_into_basic.h"
 #include "sql/engine/basic/ob_external_file_writer.h"
 #include "sql/resolver/dml/ob_select_stmt.h"
+#include "sql/engine/basic/ob_file_scan_utils.h"
 
 namespace oceanbase
 {
@@ -126,7 +127,11 @@ public:
       external_properties_(),
       format_type_(ObExternalFileFormat::FormatType::CSV_FORMAT),
       block_id_(0),
-      need_commit_(true)
+      need_commit_(true),
+      copy_writer_(NULL),
+      copy_opts_(),
+      copy_alloc_("FileSqlCopy"),
+      copy_done_(false)
   {
   }
 
@@ -195,6 +200,12 @@ public:
   virtual void destroy() override;
 
 private:
+  // COPY (query) | table TO 'file' (...): DuckDB style CSV export
+  int copy_open();
+  int copy_write_row();
+  int copy_get_next_row();
+  int copy_get_next_batch(const int64_t max_row_cnt);
+  int copy_finish(int ret, int64_t row_count);
   int init_env_common();
   int init_csv_env();
   void set_csv_format_options();
@@ -292,6 +303,10 @@ private:
   ObExternalFileFormat::FormatType format_type_;
   uint32_t block_id_;
   bool need_commit_;
+  ObFileCsvWriter *copy_writer_;
+  ObFileCopyOptions copy_opts_;
+  common::ObArenaAllocator copy_alloc_;
+  bool copy_done_;
   static const int64_t SHARED_BUFFER_SIZE = 2LL * 1024 * 1024;
 
 };
