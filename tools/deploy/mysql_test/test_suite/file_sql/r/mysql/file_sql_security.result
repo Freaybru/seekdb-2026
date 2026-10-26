@@ -1,0 +1,31 @@
+# enable_file_sql is a session switch, OFF by default
+session_default	global_default
+0	0
+enabled
+1
+cnt
+3
+ERROR 0A000: file table function while enable_file_sql is OFF, it is not supported
+# secure_file_priv restricts every path, including .. and symlinks
+inside
+3
+ERROR 42501: Access denied; you need (at least one of) the FILE (path is outside secure_file_priv) privilege(s) for this operation
+ERROR 42501: Access denied; you need (at least one of) the FILE (path is outside secure_file_priv) privilege(s) for this operation
+ERROR 42501: Access denied; you need (at least one of) the FILE (path is outside secure_file_priv) privilege(s) for this operation
+ERROR 42501: Access denied; you need (at least one of) the FILE (path is outside secure_file_priv) privilege(s) for this operation
+ERROR 42501: Access denied; you need (at least one of) the FILE (path is outside secure_file_priv) privilege(s) for this operation
+# glob only lists files inside secure_file_priv
+visible
+0
+file
+in.csv
+a
+1
+# reading or writing files needs the FILE privilege
+ERROR 42501: Access denied; you need (at least one of) the FILE privilege(s) for this operation
+ERROR 42501: Access denied; you need (at least one of) the FILE privilege(s) for this operation
+ERROR 42501: Access denied; you need (at least one of) the FILE privilege(s) for this operation
+normal_sql_still_works
+1
+cnt
+3

@@ -1,0 +1,56 @@
+# COPY is disabled while enable_file_sql is OFF
+ERROR 0A000: COPY TO while enable_file_sql is OFF, it is not supported
+# COPY a table: header, NULL string and quoting round trip
+id	txt	amount	d	txt_null
+1	plain	1.5	2026-01-02	0
+2	with,comma	NULL	NULL	0
+3	say "hi"	-3.25	2026-12-31	0
+4		0	2026-02-28	0
+5	NULL	7	2026-03-01	1
+6	it's	1	2026-04-01	0
+column_name	column_type	null	key	default	extra
+id	BIGINT	NO	NULL	NULL	NULL
+txt	VARCHAR	YES	NULL	NULL	NULL
+amount	DOUBLE	YES	NULL	NULL	NULL
+d	DATE	YES	NULL	NULL	NULL
+# custom delimiter, no header
+column0	column1
+1	plain
+2	with,comma
+3	say "hi"
+# custom quote and escape
+id	txt
+2	with,comma
+3	say "hi"
+6	it's
+# COPY a query over files (file -> file)
+id	name	note
+1	Alice	hello,<NL>world
+2	Bob	plain
+3	Chen	say "hi"
+# empty result writes only the header
+cnt
+1
+# existing target is never overwritten
+ERROR 58000: File already exist
+cnt
+6
+ERROR 58000: File already exist
+# invalid targets and options
+ERROR HY000: File not exist
+ERROR 0A000: COPY TO format other than csv is not supported
+ERROR 0A000: COPY TO option 'no_such_option' is not supported
+ERROR HY000: Incorrect arguments to COPY TO options (delimiter must differ from quote and nullstr)
+ERROR 42S02: Table 'test.no_such_table_xyz' doesn't exist
+# a failed COPY leaves no target and no temp file behind
+ERROR 0A000: COPY TO option 'no_such_option' is not supported
+file
+basic.csv
+basic.jsonl
+empty.csv
+invalid.txt
+joined.csv
+pipe.csv
+quote.csv
+simple.parquet
+t.csv

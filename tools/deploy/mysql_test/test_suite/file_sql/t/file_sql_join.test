@@ -1,0 +1,81 @@
+# owner: database-competition
+# owner group: SQL
+# description: JOINs over file tables: INNER / LEFT / cross-format / with a heap table, rescans.
+# tags: sql,executor,file_sql
+
+--source mysql_test/test_suite/file_sql/include/copy_file_sql_data.inc
+
+--disable_query_log
+let $FILE_SQL_DATA_DIR = $OBSERVER_DIR/data_for_mysqltest_file_sql;
+set session enable_file_sql = ON;
+
+--echo # INNER JOIN CSV x JSONL
+eval select c.id, c.name, j.score, j.day
+       from read_csv('$FILE_SQL_DATA_DIR/basic.csv') c
+       join read_ndjson('$FILE_SQL_DATA_DIR/basic.jsonl') j on c.id = j.id
+      order by c.id;
+
+--echo # LEFT JOIN keeps unmatched rows
+eval select c.id, j.note
+       from read_csv('$FILE_SQL_DATA_DIR/basic.csv') c
+       left join read_json('$FILE_SQL_DATA_DIR/basic.jsonl') j
+         on c.id = j.id and j.note is not null
+      order by c.id;
+
+--echo # cross-format three-way join CSV x JSONL x Parquet
+eval select p.c1, c.name, j.active
+       from read_parquet('$FILE_SQL_DATA_DIR/simple.parquet') p
+       join read_csv('$FILE_SQL_DATA_DIR/basic.csv') c on p.c1 = c.id
+       left join read_ndjson('$FILE_SQL_DATA_DIR/basic.jsonl') j on j.id = p.c1
+      order by p.c1;
+
+--echo # LEFT JOIN parquet to csv, unmatched parquet rows give NULL
+eval select p.c1, c.name
+       from read_parquet('$FILE_SQL_DATA_DIR/simple.parquet') p
+       left join read_csv('$FILE_SQL_DATA_DIR/basic.csv') c on p.c1 = c.id
+      order by p.c1;
+
+--echo # nested loop join forces rescans of the inner file scan
+eval select /*+ leading(a b) use_nl(a b) */ a.id AS a_id, b.id AS b_id
+       from read_csv('$FILE_SQL_DATA_DIR/basic.csv') a,
+            read_ndjson('$FILE_SQL_DATA_DIR/basic.jsonl') b
+      where a.id < b.id
+      order by 1, 2;
+
+--echo # correlated subquery and EXISTS over files
+eval select a.id,
+            (select count(*) from read_csv('$FILE_SQL_DATA_DIR/basic.csv') x where x.id <= a.id) AS running
+       from read_csv('$FILE_SQL_DATA_DIR/basic.csv') a
+      order by a.id;
+eval select a.name
+       from read_csv('$FILE_SQL_DATA_DIR/basic.csv') a
+      where exists (select 1 from read_parquet('$FILE_SQL_DATA_DIR/simple.parquet') p where p.c1 = a.id * 2)
+      order by a.name;
+
+--echo # join a file with a regular table and aggregate
+--disable_warnings
+drop table if exists file_sql_dept;
+--enable_warnings
+create table file_sql_dept (id bigint primary key, dept varchar(16));
+insert into file_sql_dept values (1, 'eng'), (2, 'ops'), (3, 'eng'), (4, 'hr');
+eval select d.dept, count(*) AS cnt, round(sum(c.score), 2) AS total
+       from file_sql_dept d
+       join read_csv('$FILE_SQL_DATA_DIR/basic.csv') c on c.id = d.id
+      group by d.dept
+      order by d.dept;
+eval select d.id, d.dept, c.name
+       from file_sql_dept d
+       left join read_csv('$FILE_SQL_DATA_DIR/basic.csv') c on c.id = d.id
+      order by d.id;
+drop table file_sql_dept;
+
+--echo # self join of the same file under two aliases
+eval select a.id, b.id__2
+       from read_csv('$FILE_SQL_DATA_DIR/basic.csv') a
+       join read_csv('$FILE_SQL_DATA_DIR/basic.csv') b on a.id + 100 = b.id__2
+      order by a.id;
+
+set session enable_file_sql = OFF;
+--enable_query_log
+
+--source mysql_test/test_suite/file_sql/include/remove_file_sql_data.inc

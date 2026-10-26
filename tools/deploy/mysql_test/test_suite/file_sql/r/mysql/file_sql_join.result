@@ -1,0 +1,52 @@
+# INNER JOIN CSV x JSONL
+id	name	score	day
+1	Alice	98.5	NULL
+2	Bob	NULL	2026-08-02
+3	Chen	90	NULL
+# LEFT JOIN keeps unmatched rows
+id	note
+1	NULL
+2	NULL
+3	ok
+# cross-format three-way join CSV x JSONL x Parquet
+c1	name	active
+1	Alice	1
+2	Bob	0
+3	Chen	1
+# LEFT JOIN parquet to csv, unmatched parquet rows give NULL
+c1	name
+0	NULL
+1	Alice
+2	Bob
+3	Chen
+4	NULL
+5	NULL
+6	NULL
+# nested loop join forces rescans of the inner file scan
+a_id	b_id
+1	2
+1	3
+2	3
+# correlated subquery and EXISTS over files
+id	running
+1	1
+2	2
+3	3
+name
+Alice
+Bob
+Chen
+# join a file with a regular table and aggregate
+dept	cnt	total
+eng	2	188.75
+ops	1	87.00
+id	dept	name
+1	eng	Alice
+2	ops	Bob
+3	eng	Chen
+4	hr	NULL
+# self join of the same file under two aliases
+id	id__2
+1	101
+2	102
+3	103

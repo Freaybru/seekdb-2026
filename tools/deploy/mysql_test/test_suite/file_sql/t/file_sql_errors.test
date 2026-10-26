@@ -1,0 +1,102 @@
+# owner: database-competition
+# owner group: SQL
+# description: error handling of file table functions; normal SQL must keep working.
+# tags: sql,executor,file_sql
+
+--source mysql_test/test_suite/file_sql/include/copy_file_sql_data.inc
+
+--disable_query_log
+let $FILE_SQL_DATA_DIR = $OBSERVER_DIR/data_for_mysqltest_file_sql;
+
+--echo # disabled by default for every entry point
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval select * from read_json('$FILE_SQL_DATA_DIR/basic.jsonl');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval select * from read_parquet('$FILE_SQL_DATA_DIR/simple.parquet');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval select * from glob('$FILE_SQL_DATA_DIR/*');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval describe select * from read_csv('$FILE_SQL_DATA_DIR/basic.csv');
+
+set session enable_file_sql = ON;
+
+--echo # missing file and directory arguments
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1017
+eval select * from read_csv('$FILE_SQL_DATA_DIR/no_such_file.csv');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1210
+eval select * from read_csv('$FILE_SQL_DATA_DIR');
+
+--echo # wrong format for the file
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1210
+eval select * from read_parquet('$FILE_SQL_DATA_DIR/basic.csv');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1210
+eval select * from read_json('$FILE_SQL_DATA_DIR/basic.csv');
+
+--echo # options: unknown, bad values, sample_size other than -1
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval select * from read_csv('$FILE_SQL_DATA_DIR/basic.csv', no_such_option = 1);
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1210
+eval select * from read_csv('$FILE_SQL_DATA_DIR/basic.csv', header = 'maybe');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1210
+eval select * from read_csv('$FILE_SQL_DATA_DIR/basic.csv', delim = '');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval select * from read_csv('$FILE_SQL_DATA_DIR/basic.csv', sample_size = 100);
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval select * from read_json('$FILE_SQL_DATA_DIR/basic.jsonl', format = 'xml');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1064
+eval select * from read_csv('$FILE_SQL_DATA_DIR/basic.csv', header);
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1064
+eval select * from not_a_reader('$FILE_SQL_DATA_DIR/basic.csv');
+
+--echo # file tables are read only
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1064
+eval insert into read_csv('$FILE_SQL_DATA_DIR/basic.csv') values (1);
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1064
+eval delete from read_csv('$FILE_SQL_DATA_DIR/basic.csv');
+
+--echo # options that change parsing
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select * from read_csv('$FILE_SQL_DATA_DIR/basic.csv', header = false, skip = 1)
+      order by 1;
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select count(*) AS cnt from read_csv('$FILE_SQL_DATA_DIR/basic.csv', sample_size = -1, all_varchar = true);
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval describe select * from read_csv('$FILE_SQL_DATA_DIR/basic.csv', all_varchar = true);
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval describe select * from read_ndjson('$FILE_SQL_DATA_DIR/basic.jsonl');
+
+--echo # glob without matches is an empty result
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select count(*) AS cnt from glob('$FILE_SQL_DATA_DIR/*.nomatch');
+
+--echo # ordinary SQL is unaffected, including identifiers named like the new functions
+--disable_warnings
+drop table if exists file_sql_plain;
+--enable_warnings
+create table file_sql_plain (glob int, read_csv varchar(10), copy int);
+insert into file_sql_plain values (1, 'a', 2);
+select glob, read_csv, copy from file_sql_plain;
+describe file_sql_plain;
+drop table file_sql_plain;
+
+set session enable_file_sql = OFF;
+--enable_query_log
+
+--source mysql_test/test_suite/file_sql/include/remove_file_sql_data.inc

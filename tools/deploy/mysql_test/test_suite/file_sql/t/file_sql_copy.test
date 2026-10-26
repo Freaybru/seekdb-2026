@@ -1,0 +1,109 @@
+# owner: database-competition
+# owner group: SQL
+# description: COPY (query | table) TO 'file' with CSV options, read back with read_csv.
+# tags: sql,executor,file_sql
+
+--source mysql_test/test_suite/file_sql/include/copy_file_sql_data.inc
+
+--disable_query_log
+let $FILE_SQL_DATA_DIR = $OBSERVER_DIR/data_for_mysqltest_file_sql;
+
+--echo # COPY is disabled while enable_file_sql is OFF
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval copy (select 1 AS a) to '$FILE_SQL_DATA_DIR/off.csv';
+
+set session enable_file_sql = ON;
+
+--echo # COPY a table: header, NULL string and quoting round trip
+--disable_warnings
+drop table if exists file_sql_copy_src;
+--enable_warnings
+create table file_sql_copy_src (id int primary key, txt varchar(32), amount decimal(10, 2), d date);
+insert into file_sql_copy_src values
+  (1, 'plain', 1.50, '2026-01-02'),
+  (2, 'with,comma', NULL, NULL),
+  (3, 'say "hi"', -3.25, '2026-12-31'),
+  (4, '', 0, '2026-02-28'),
+  (5, NULL, 7, '2026-03-01'),
+  (6, 'it''s', 1, '2026-04-01');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval copy file_sql_copy_src to '$FILE_SQL_DATA_DIR/t.csv' (header, nullstr 'NULL');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select id, txt, amount, d, txt is null AS txt_null
+       from read_csv('$FILE_SQL_DATA_DIR/t.csv', nullstr = 'NULL')
+      order by id;
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval describe select * from read_csv('$FILE_SQL_DATA_DIR/t.csv', nullstr = 'NULL');
+
+--echo # custom delimiter, no header
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval copy (select id, txt from file_sql_copy_src where id <= 3 order by id)
+       to '$FILE_SQL_DATA_DIR/pipe.csv' (format csv, header false, delimiter '|');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select * from read_csv('$FILE_SQL_DATA_DIR/pipe.csv', header = false, delim = '|') order by 1;
+
+--echo # custom quote and escape
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval copy (select id, txt from file_sql_copy_src where id in (2, 3, 6) order by id)
+       to '$FILE_SQL_DATA_DIR/quote.csv' (quote '''', escape '!');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select * from read_csv('$FILE_SQL_DATA_DIR/quote.csv', quote = '''', escape = '!') order by id;
+
+--echo # COPY a query over files (file -> file)
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval copy (select j.id, j.name, c.note
+             from read_ndjson('$FILE_SQL_DATA_DIR/basic.jsonl') j
+             join read_csv('$FILE_SQL_DATA_DIR/basic.csv') c on c.id = j.id
+            order by j.id)
+       to '$FILE_SQL_DATA_DIR/joined.csv';
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select id, name, replace(note, char(10), '<NL>') AS note
+       from read_csv('$FILE_SQL_DATA_DIR/joined.csv')
+      order by id;
+
+--echo # empty result writes only the header
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval copy (select id, txt from file_sql_copy_src where id > 100) to '$FILE_SQL_DATA_DIR/empty.csv';
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select count(*) AS cnt from glob('$FILE_SQL_DATA_DIR/empty.csv');
+
+--echo # existing target is never overwritten
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1086
+eval copy file_sql_copy_src to '$FILE_SQL_DATA_DIR/t.csv';
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select count(*) AS cnt from read_csv('$FILE_SQL_DATA_DIR/t.csv', nullstr = 'NULL');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1086
+eval copy file_sql_copy_src to '$FILE_SQL_DATA_DIR/basic.csv';
+
+--echo # invalid targets and options
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1017
+eval copy file_sql_copy_src to '$FILE_SQL_DATA_DIR/no_dir/x.csv';
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval copy file_sql_copy_src to '$FILE_SQL_DATA_DIR/x.csv' (format parquet);
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval copy file_sql_copy_src to '$FILE_SQL_DATA_DIR/x.csv' (no_such_option 1);
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1210
+eval copy file_sql_copy_src to '$FILE_SQL_DATA_DIR/x.csv' (delimiter ',', quote ',');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1146
+eval copy no_such_table_xyz to '$FILE_SQL_DATA_DIR/x.csv';
+
+--echo # a failed COPY leaves no target and no temp file behind
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval copy (select * from read_parquet('$FILE_SQL_DATA_DIR/simple.parquet') where c1 > 0 limit 1) to '$FILE_SQL_DATA_DIR/x.csv' (no_such_option 1);
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select substring_index(file, '/', -1) AS file from glob('$FILE_SQL_DATA_DIR/*') order by file;
+
+drop table file_sql_copy_src;
+set session enable_file_sql = OFF;
+--enable_query_log
+
+--source mysql_test/test_suite/file_sql/include/remove_file_sql_data.inc

@@ -1,0 +1,99 @@
+# owner: database-competition
+# owner group: SQL
+# description: enable_file_sql switch, secure_file_priv sandbox and FILE privilege for file SQL.
+# tags: sql,executor,file_sql
+
+--source mysql_test/test_suite/file_sql/include/copy_file_sql_data.inc
+
+--disable_query_log
+let $FILE_SQL_DATA_DIR = $OBSERVER_DIR/data_for_mysqltest_file_sql;
+let $FILE_SQL_HOST = query_get_value('select host_ip()',host_ip(), 1);
+
+--echo # enable_file_sql is a session switch, OFF by default
+select @@session.enable_file_sql AS session_default, @@global.enable_file_sql AS global_default;
+set session enable_file_sql = ON;
+select @@session.enable_file_sql AS enabled;
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select count(*) AS cnt from read_csv('$FILE_SQL_DATA_DIR/basic.csv');
+set session enable_file_sql = OFF;
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1235
+eval select count(*) AS cnt from read_csv('$FILE_SQL_DATA_DIR/basic.csv');
+
+--echo # secure_file_priv restricts every path, including .. and symlinks
+let $FILE_SQL_SUB_CMD = ssh $FILE_SQL_HOST 'mkdir -p "$FILE_SQL_DATA_DIR/sub" && cp "$FILE_SQL_DATA_DIR/basic.csv" "$FILE_SQL_DATA_DIR/sub/in.csv" && ln -s "$FILE_SQL_DATA_DIR/basic.jsonl" "$FILE_SQL_DATA_DIR/sub/link.jsonl"';
+exec $FILE_SQL_SUB_CMD;
+connect (file_sql_sock,localhost,admin,$OBMYSQL_PWD,test,$OBMYSQL_PORT,$OBSERVER_DIR/run/sql.sock);
+connection file_sql_sock;
+eval set global secure_file_priv = '$FILE_SQL_DATA_DIR/sub';
+disconnect file_sql_sock;
+connect (file_sql_priv,$OBMYSQL_MS0,admin,$OBMYSQL_PWD,test,$OBMYSQL_PORT);
+connection file_sql_priv;
+set session enable_file_sql = ON;
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select count(*) AS inside from read_csv('$FILE_SQL_DATA_DIR/sub/in.csv');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1227
+eval select count(*) from read_csv('$FILE_SQL_DATA_DIR/basic.csv');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1227
+eval select count(*) from read_csv('$FILE_SQL_DATA_DIR/sub/../basic.csv');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1227
+eval select count(*) from read_ndjson('$FILE_SQL_DATA_DIR/sub/link.jsonl');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1227
+eval select count(*) from read_parquet('$FILE_SQL_DATA_DIR/simple.parquet');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1227
+eval copy (select 1 AS a) to '$FILE_SQL_DATA_DIR/out.csv';
+--echo # glob only lists files inside secure_file_priv
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select count(*) AS visible from glob('$FILE_SQL_DATA_DIR/*');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select substring_index(file, '/', -1) AS file from glob('$FILE_SQL_DATA_DIR/sub/*') order by file;
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval copy (select 1 AS a) to '$FILE_SQL_DATA_DIR/sub/out.csv';
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select a from read_csv('$FILE_SQL_DATA_DIR/sub/out.csv');
+disconnect file_sql_priv;
+connect (file_sql_sock2,localhost,admin,$OBMYSQL_PWD,test,$OBMYSQL_PORT,$OBSERVER_DIR/run/sql.sock);
+connection file_sql_sock2;
+set global secure_file_priv = '/';
+disconnect file_sql_sock2;
+connection default;
+
+--echo # reading or writing files needs the FILE privilege
+--disable_warnings
+drop user if exists file_sql_nofile;
+--enable_warnings
+create user file_sql_nofile identified by 'nofile';
+grant select on test.* to file_sql_nofile;
+connect (file_sql_user,$OBMYSQL_MS0,file_sql_nofile,nofile,test,$OBMYSQL_PORT);
+connection file_sql_user;
+set session enable_file_sql = ON;
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1227
+eval select count(*) from read_csv('$FILE_SQL_DATA_DIR/basic.csv');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1227
+eval select count(*) from glob('$FILE_SQL_DATA_DIR/*');
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+--error 1227
+eval copy (select 1 AS a) to '$FILE_SQL_DATA_DIR/nofile.csv';
+select 1 AS normal_sql_still_works;
+disconnect file_sql_user;
+connection default;
+grant file on *.* to file_sql_nofile;
+connect (file_sql_user2,$OBMYSQL_MS0,file_sql_nofile,nofile,test,$OBMYSQL_PORT);
+connection file_sql_user2;
+set session enable_file_sql = ON;
+--replace_result $FILE_SQL_DATA_DIR DATA_DIR
+eval select count(*) AS cnt from read_csv('$FILE_SQL_DATA_DIR/basic.csv');
+disconnect file_sql_user2;
+connection default;
+drop user file_sql_nofile;
+
+--enable_query_log
+
+--source mysql_test/test_suite/file_sql/include/remove_file_sql_data.inc

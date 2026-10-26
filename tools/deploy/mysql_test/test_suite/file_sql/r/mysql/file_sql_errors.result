@@ -1,0 +1,56 @@
+# disabled by default for every entry point
+ERROR 0A000: file table function while enable_file_sql is OFF, it is not supported
+ERROR 0A000: file table function while enable_file_sql is OFF, it is not supported
+ERROR 0A000: file table function while enable_file_sql is OFF, it is not supported
+ERROR 0A000: file table function while enable_file_sql is OFF, it is not supported
+# missing file and directory arguments
+ERROR HY000: File not exist
+ERROR HY000: Incorrect arguments to read_csv: not a regular file
+# wrong format for the file
+ERROR HY000: Incorrect arguments to read_parquet: DATA_DIR/basic.csv: not a parquet file (missing PAR1 footer magic)
+ERROR HY000: Incorrect arguments to read_json: DATA_DIR/basic.csv line 1: each record must be a JSON object
+# options: unknown, bad values, sample_size other than -1
+ERROR 0A000: option 'no_such_option' of read_csv is not supported
+ERROR HY000: Incorrect arguments to read_csv option 'header'
+ERROR HY000: Incorrect arguments to read_csv option 'delim'
+ERROR 0A000: sample_size other than -1 (full scan inference) is not supported
+ERROR 0A000: json format other than auto/newline_delimited/array is not supported
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your OceanBase version for the right syntax to use near ')' at line 1
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your OceanBase version for the right syntax to use near 'not_a_reader('DATA_DIR/basic.csv')' at line 1
+# file tables are read only
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your OceanBase version for the right syntax to use near ''DATA_DIR/basic.csv') values (1)' at line 1
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your OceanBase version for the right syntax to use near '('DATA_DIR/basic.csv')' at line 1
+# options that change parsing
+column0	column1	column2	column3	column4	column5	column6	column7
+1	Alice	98.5	1	2026-08-01	2026-08-01 10:11:12	hello,
+world	101
+2	Bob	87	0	NULL	NULL	plain	102
+3	Chen	90.25	1	2026-08-03	2026-08-03 12:13:14	say "hi"	103
+cnt
+3
+column_name	column_type	null	key	default	extra
+id	VARCHAR	NO	NULL	NULL	NULL
+name	VARCHAR	NO	NULL	NULL	NULL
+score	VARCHAR	NO	NULL	NULL	NULL
+active	VARCHAR	NO	NULL	NULL	NULL
+day	VARCHAR	YES	NULL	NULL	NULL
+created	VARCHAR	YES	NULL	NULL	NULL
+note	VARCHAR	NO	NULL	NULL	NULL
+id__2	VARCHAR	NO	NULL	NULL	NULL
+column_name	column_type	null	key	default	extra
+id	BIGINT	NO	NULL	NULL	NULL
+name	VARCHAR	NO	NULL	NULL	NULL
+score	DOUBLE	YES	NULL	NULL	NULL
+active	BOOLEAN	NO	NULL	NULL	NULL
+day	DATE	YES	NULL	NULL	NULL
+note	VARCHAR	YES	NULL	NULL	NULL
+# glob without matches is an empty result
+cnt
+0
+# ordinary SQL is unaffected, including identifiers named like the new functions
+glob	read_csv	copy
+1	a	2
+Field	Type	Null	Key	Default	Extra
+glob	int(11)	YES		NULL	
+read_csv	varchar(10)	YES		NULL	
+copy	int(11)	YES		NULL	
