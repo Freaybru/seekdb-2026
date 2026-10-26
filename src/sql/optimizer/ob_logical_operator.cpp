@@ -1257,7 +1257,10 @@ int ObLogicalOperator::get_plan_item_info(PlanText &plan_text,
     /* Do nothing */
   } else if (NULL != get_plan() &&
               get_plan()->get_optimizer_context().get_batch_size() > 0 &&
-              ObOperatorFactory::is_vectorized(phy_type)) {
+              ObOperatorFactory::is_vectorized(phy_type) &&
+              // values tables run in batch mode only for file scans (see CG)
+              !(log_op_def::LOG_VALUES_TABLE_ACCESS == get_type() &&
+                !static_cast<const ObLogValuesTableAccess *>(this)->is_file_table())) {
     plan_item.rowset_ = get_plan()->get_optimizer_context().get_batch_size();
   } else { /* Do nothing */ }
   return ret;
