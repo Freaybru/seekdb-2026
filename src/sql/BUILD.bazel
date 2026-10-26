@@ -412,6 +412,25 @@ grouped_unity_cc_library(
     visibility = ["//src/observer:__pkg__"],
 )
 
+
+# Compile-only header seam for AI expression unit tests. liboceanbase is a
+# cc_import and does not provide compile-time includes; tests compile against
+# this target (memtable/tx pattern) then link liboceanbase.
+cc_library(
+    name = "ai_expr_test_headers",
+    testonly = True,
+    hdrs = [
+        "engine/expr/ob_expr_ai/ob_ai_func_client.h",
+        "engine/expr/ob_expr_ai/ob_expr_ai_rerank.h",
+    ],
+    deps = [
+        ":sql_runtime_interface",
+        "//src/oblib:oblib_common",
+    ] + _SQL_INTERFACE_NATIVE_DEPS,
+    tags = ["manual"],
+    visibility = ["//unittest/sql/engine/expr:__pkg__"],
+)
+
 # Complete checked-in SQL object closure except generated server-parser objects.
 cc_library(
     name = "sql_objects",
