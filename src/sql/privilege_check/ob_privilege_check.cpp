@@ -316,6 +316,19 @@ int get_dml_stmt_need_privs(
             need_priv.priv_level_ = OB_PRIV_USER_LEVEL;
             ADD_NEED_PRIV(need_priv);
           }
+        }
+        if (OB_SUCC(ret) && NULL != basic_stmt->get_query_ctx()
+            && basic_stmt->get_query_ctx()->has_file_table()
+            && !(stmt::T_SELECT == stmt_type
+                 && static_cast<const ObSelectStmt*>(basic_stmt)->is_select_into_outfile())) {
+          // reading server-side files (read_csv/read_json/read_parquet/glob) needs the FILE
+          // privilege, the same rule as LOAD DATA INFILE / SELECT ... INTO OUTFILE
+          ObNeedPriv file_priv;
+          file_priv.priv_set_ = OB_PRIV_FILE;
+          file_priv.priv_level_ = OB_PRIV_USER_LEVEL;
+          ADD_NEED_PRIV(file_priv);
+        }
+        if (stmt::T_SELECT == stmt_type) {
         } else if (stmt::T_INSERT == stmt_type) {
           priv_set = OB_PRIV_INSERT;
           op_literal = ObString::make_string("INSERT");

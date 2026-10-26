@@ -4484,6 +4484,8 @@ int ObValuesTableDef::deep_copy(const ObValuesTableDef &other,
     column_cnt_ = other.column_cnt_;
     row_cnt_ = other.row_cnt_;
     is_const_ = other.is_const_;
+    is_file_table_ = other.is_file_table_;
+    file_info_ = other.file_info_;
     for (int64_t i = 0; OB_SUCC(ret) && i < other.access_objs_.count(); ++i) {
       const ObObjParam &obj = other.access_objs_.at(i);
       ObObjParam tmp_obj = obj;

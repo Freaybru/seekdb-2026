@@ -3530,6 +3530,9 @@ int ObSql::need_add_plan(const ObPlanCacheCtx &pc_ctx,
     ret = OB_ERR_UNEXPECTED;
   } else if (result.get_exec_context().get_stmt_factory()->get_query_ctx()->has_hybrid_search()) {
     need_add_plan = false;
+  } else if (result.get_exec_context().get_stmt_factory()->get_query_ctx()->has_file_table()) {
+    // file sql: schema is inferred from file content, which may change between executions
+    need_add_plan = false;
   }
   return ret;
 }

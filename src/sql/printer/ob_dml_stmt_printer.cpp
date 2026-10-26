@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL
+#include "sql/engine/basic/ob_file_scan_utils.h"
 #include "ob_dml_stmt_printer.h"
 #include "sql/printer/ob_select_stmt_printer.h"
 #include "sql/ob_sql_context.h"
@@ -379,7 +380,13 @@ int ObDMLStmtPrinter::print_values_table(const TableItem &table_item, bool no_pr
     ret = OB_ERR_UNEXPECTED;
   } else {
     const int64_t column_cnt = table_def->column_cnt_;
-    if (ObValuesTableDef::ACCESS_EXPR == table_def->access_type_ ||
+    if (ObValuesTableDef::ACCESS_FILE == table_def->access_type_ && NULL != table_def->file_info_) {
+      const ObFileTableInfo *info = table_def->file_info_;
+      DATA_PRINTF("%.*s('%.*s') %.*s", LEN_AND_PTR(info->func_name_),
+                  static_cast<int>(info->path_.length() > 0 && '\0' == info->path_.ptr()[info->path_.length() - 1]
+                                   ? info->path_.length() - 1 : info->path_.length()),
+                  info->path_.ptr(), LEN_AND_PTR(table_item.alias_name_));
+    } else if (ObValuesTableDef::ACCESS_EXPR == table_def->access_type_ ||
         ObValuesTableDef::FOLD_ACCESS_EXPR == table_def->access_type_) {
       const ObIArray<ObRawExpr *> &values = table_def->access_exprs_;
       if (OB_UNLIKELY(column_cnt <= 0 || values.empty() || values.count() % column_cnt != 0)) {

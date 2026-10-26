@@ -1657,7 +1657,14 @@ int ObSelectResolver::expand_target_list(
   } else if (table_item.is_values_table()) {
     if (OB_ISNULL(get_stmt()) || OB_UNLIKELY(get_stmt()->get_column_size() == 0)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(append(column_items, get_stmt()->get_column_items()))) {
+    } else {
+      // only the columns of this values table (several values/file tables may be joined)
+      const ObIArray<ColumnItem> &all_columns = get_stmt()->get_column_items();
+      for (int64_t i = 0; OB_SUCC(ret) && i < all_columns.count(); ++i) {
+        if (all_columns.at(i).table_id_ == table_item.table_id_
+            && OB_FAIL(column_items.push_back(all_columns.at(i)))) {
+        }
+      }
     }
   } else {
     ret = OB_ERR_UNEXPECTED;

@@ -94,6 +94,7 @@
 #include "sql/resolver/cmd/ob_get_diagnostics_resolver.h"
 #include "sql/resolver/dcl/ob_alter_role_resolver.h"
 #include "sql/pl/ob_pl_package.h"
+#include "sql/resolver/dml/ob_file_table_resolver.h"
 
 namespace oceanbase
 {
@@ -135,6 +136,15 @@ int ObResolver::select_stmt_resolver_func(ObResolverParams &params, const ParseN
     stmt = stmt_resolver.get_basic_stmt();
   }
   return ret;
+}
+
+static void set_select_stmt_type(ObResolverParams &params)
+{
+  params.session_info_->set_stmt_type(stmt::T_SELECT);
+  ObExecContext *exec_ctx = params.session_info_->get_cur_exec_ctx();
+  if (exec_ctx != nullptr && exec_ctx->get_sql_ctx() != nullptr) {
+    exec_ctx->get_sql_ctx()->stmt_type_ = stmt::T_SELECT;
+  }
 }
 
 int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObStmt *&stmt)
@@ -473,7 +483,24 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         break;
       }
       case T_EXPLAIN: {
-        REGISTER_STMT_RESOLVER(Explain);
+        if (1 == real_parse_tree->param_num_ && 5 == real_parse_tree->num_child_
+            && NULL != real_parse_tree->children_[4]
+            && T_SELECT == real_parse_tree->children_[4]->type_
+            && ObFileSqlResolverUtil::contains_file_table(real_parse_tree->children_[4])) {
+          // DESCRIBE <query over files>: result columns are described by a constant select
+          if (OB_FAIL(ObFileSqlResolverUtil::resolve_describe(params_, *real_parse_tree->children_[4],
+                                                              stmt))) {
+          } else {
+            set_select_stmt_type(params_);
+          }
+        } else {
+          REGISTER_STMT_RESOLVER(Explain);
+        }
+        break;
+      }
+      case T_COPY_TO: {
+        if (OB_FAIL(ObFileSqlResolverUtil::resolve_copy(params_, *real_parse_tree, stmt))) {
+        }
         break;
       }
       case T_ALTER_SYSTEM_SET: {

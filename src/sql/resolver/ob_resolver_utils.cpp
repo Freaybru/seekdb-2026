@@ -1679,6 +1679,10 @@ stmt::StmtType ObResolverUtils::get_stmt_type_by_item_type(const ObItemType item
   } break;
       // dml
       SET_STMT_TYPE(T_SELECT);
+      case T_COPY_TO: {
+        // COPY (query) | table TO 'file' is executed as a select with a select-into item
+        type = stmt::T_SELECT;
+      } break;
       SET_STMT_TYPE(T_INSERT);
       SET_STMT_TYPE(T_DELETE);
       SET_STMT_TYPE(T_UPDATE);

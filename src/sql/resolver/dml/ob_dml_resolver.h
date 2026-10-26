@@ -778,6 +778,11 @@ private:
   bool check_expr_has_colref(ObRawExpr *expr);
 
   int resolve_values_table_item(const ParseNode &table_node, TableItem *&table_item);
+  // read_csv/read_json/read_ndjson/read_parquet/glob table functions (file as database)
+  int resolve_file_table_item(const ParseNode &table_node, TableItem *&table_item);
+  int gen_file_table_column_items(TableItem &table_item,
+                                  const common::ObIArray<common::ObString> &names,
+                                  const common::ObIArray<ObRawExprResType> &types);
   int resolve_values_table_for_select(const ParseNode &table_node,
                                       ObValuesTableDef &table_values);
   int resolve_values_table_for_insert(const ParseNode &table_node,

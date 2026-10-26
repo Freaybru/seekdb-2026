@@ -236,6 +236,8 @@ SQL_UNITY_GROUPS = [
             "src/sql/engine/basic/chunk_store/ob_compact_block_writer.cpp",
             "src/sql/engine/basic/chunk_store/ob_chunk_block_compressor.cpp",
             "src/sql/engine/basic/ob_values_table_access_op.cpp",
+            "src/sql/engine/basic/ob_file_scan_utils.cpp",
+            "src/sql/engine/basic/ob_file_parquet_reader.cpp",
         ],
     ),
     struct(
@@ -1373,6 +1375,7 @@ SQL_UNITY_GROUPS = [
             "src/sql/resolver/dml/ob_delete_resolver.cpp",
             "src/sql/resolver/dml/ob_delete_stmt.cpp",
             "src/sql/resolver/dml/ob_dml_resolver.cpp",
+            "src/sql/resolver/dml/ob_file_table_resolver.cpp",
             "src/sql/resolver/dml/ob_dml_stmt.cpp",
             "src/sql/resolver/dml/ob_group_by_checker.cpp",
             "src/sql/resolver/dml/ob_insert_resolver.cpp",

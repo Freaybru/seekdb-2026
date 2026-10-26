@@ -2724,6 +2724,12 @@ int ObDMLResolver::resolve_table(const ParseNode &parse_tree,
         }
         break;
       }
+      case T_FILE_TABLE_FUNCTION: {
+        if (OB_FAIL(resolve_file_table_item(*table_node, table_item))) {
+          LOG_WARN("failed to resolve file table function", K(ret));
+        }
+        break;
+      }
       default:
         /* won't be here */
         ret = OB_ERR_PARSER_SYNTAX;
