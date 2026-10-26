@@ -81,6 +81,7 @@ int ObAiModelEndpointInfo::deep_copy(
   int ret = OB_SUCCESS;
   reset();
   endpoint_id_ = other.endpoint_id_;
+  max_concurrency_ = other.max_concurrency_;
   if (OB_FAIL(ob_write_string(allocator, other.name_, name_))) {
   } else if (OB_FAIL(ob_write_string(allocator, other.scope_, scope_))) {
   } else if (OB_FAIL(ob_write_string(allocator, other.ai_model_name_, ai_model_name_))) {
@@ -133,6 +134,9 @@ int ObAiModelEndpointInfo::check_valid() const
   } else if (!response_transform_fn_.empty()) {
     ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("response_transform_fn"), "response_transform_fn");
+  } else if (!is_valid_max_concurrency(max_concurrency_)) {
+    ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+    LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("max_concurrency"), "max_concurrency");
   }
   return ret;
 }
@@ -167,6 +171,29 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
       EXTRACT_JSON_ELEM_STR("parameters", parameters_)
       EXTRACT_JSON_ELEM_STR("request_transform_fn", request_transform_fn_)
       EXTRACT_JSON_ELEM_STR("response_transform_fn", response_transform_fn_)
+      if (elem.first.case_compare("max_concurrency") == 0) {
+        // Only a JSON integer in [1, 1024] is accepted; strings, floats and
+        // booleans are rejected instead of being implicitly converted.
+        const ObJsonNodeType jtype = elem.second->json_type();
+        bool valid = false;
+        int64_t value = 0;
+        if (jtype == ObJsonNodeType::J_INT) {
+          value = elem.second->get_int();
+          valid = is_valid_max_concurrency(value);
+        } else if (jtype == ObJsonNodeType::J_UINT) {
+          const uint64_t uvalue = elem.second->get_uint();
+          valid = uvalue <= static_cast<uint64_t>(MAX_MAX_CONCURRENCY);
+          value = static_cast<int64_t>(uvalue);
+          valid = valid && is_valid_max_concurrency(value);
+        }
+        if (!valid) {
+          ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+          LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, elem.first.length(), elem.first.ptr());
+          LOG_WARN("invalid max_concurrency", K(ret), K(jtype));
+        } else {
+          max_concurrency_ = value;
+        }
+      } else
       EXTRACT_JSON_ELEM_END()
     }
     iter.next();
