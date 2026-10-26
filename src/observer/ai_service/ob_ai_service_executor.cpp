@@ -180,9 +180,10 @@ int ObAiServiceExecutor::construct_new_endpoint(common::ObArenaAllocator &alloca
                                                 ObAiModelEndpointInfo &new_endpoint)
 {
   int ret = OB_SUCCESS;
-  new_endpoint = old_endpoint;
-  if (OB_FAIL(new_endpoint.merge_delta_endpoint(allocator, alter_jbase))) {
-  } 
+  // Deep-copy so empty access_key and other fields stay owned by allocator across merge/update.
+  if (OB_FAIL(new_endpoint.deep_copy(allocator, old_endpoint))) {
+  } else if (OB_FAIL(new_endpoint.merge_delta_endpoint(allocator, alter_jbase))) {
+  }
   return ret;
 }
 

@@ -90,8 +90,8 @@ select ai_complete('complete_openai', ai_prompt('pre\\{0\\}post', 'NO'));
 select ai_complete('complete_openai', 'hello', NULL);
 select ai_complete('complete_openai', 'hello', '{"temperature":0.2,"max_tokens":16}');
 select ai_complete('complete_openai', repeat('x', 64));
---error 1210,4070
 --disable_result_log
+--error 1210,4070
 select ai_complete('complete_openai', 'BAD_EMPTY');
 --enable_result_log
 
@@ -110,9 +110,10 @@ insert into t_embed_small values (1, 'a'), (2, NULL), (3, 'c');
 select id, ai_embed('embed_openai', c) from t_embed_small order by id;
 select ai_embed('embed_openai', c) from t_embed_small where id <> 2 order by id;
 select ai_embed('embed_openai', c) from t_embed_small where id <> 2 order by id limit 1;
---error 1210,4070
 --disable_result_log
+--error 1210,4070
 select ai_embed('embed_openai', 'a', 0);
+--error 1210,4070
 select ai_embed('embed_openai', 'BAD_DIM', 2);
 --enable_result_log
 
@@ -128,8 +129,8 @@ insert into t_embed_batch values
 (24,'r24'),(25,'r25'),(26,'r26'),(27,'r27'),(28,'r28'),(29,'r29'),(30,'r30'),(31,'r31'),
 (32,'r32');
 select id, ai_embed('embed_openai', c) from t_embed_batch order by id;
---error 1210,4070,4216
 --disable_result_log
+--error 1210,4070,4216
 select ai_embed('embed_openai', case when id = 0 then 'FAIL' else c end) from t_embed_batch where id < 2;
 --enable_result_log
 

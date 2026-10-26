@@ -8,9 +8,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 def vector_for(text, dimension):
+    # BAD_DIM must keep a mismatched length so AI_EMBED rejects it.
     if text == "BAD_DIM":
-        values = [1]
-    elif text == "a":
+        return [1]
+    if text == "a":
         values = [1, 0, 0]
     elif text == "b":
         values = [0, 1, 0]
@@ -86,7 +87,9 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(inputs, str):
             inputs = [inputs]
         if any(item == "FAIL" for item in inputs):
-            self._send(500, {"error": "injected embedding failure"})
+            # Use 400 (not 500): ObAIFuncClient retries 500/502/503/504 and can
+            # exceed ob_query_timeout before surfacing OB_CURL_ERROR (4216).
+            self._send(400, {"error": "injected embedding failure"})
             return
         dimension = request.get("dimensions")
         data = []

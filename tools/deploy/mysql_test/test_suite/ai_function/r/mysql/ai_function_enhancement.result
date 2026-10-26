@@ -1,4 +1,3 @@
-connection default;
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('complete_ep');
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('embed_ep');
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('rerank_ep');
