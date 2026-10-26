@@ -1,0 +1,151 @@
+#owner: seekdb-ai
+# Requires Mock AI Service on 0.0.0.0:8000 before this file runs:
+#   python3 tools/deploy/mysql_test/test_suite/ai_function/mock_ai_service.py
+
+connection default;
+
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('complete_ep');
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('embed_ep');
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('rerank_ep');
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ollama_complete_ep');
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ollama_embed_ep');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('complete_openai');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('embed_openai');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('rerank_model');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('ollama_complete');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('ollama_embed');
+
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('complete_openai', '{"type":"completion","model_name":"gpt-test"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('embed_openai', '{"type":"dense_embedding","model_name":"embed-test"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('rerank_model', '{"type":"rerank","model_name":"rerank-test"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('ollama_complete', '{"type":"completion","model_name":"llama3.1"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('ollama_embed', '{"type":"dense_embedding","model_name":"nomic-embed"}');
+
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('complete_ep', '{
+  "ai_model_name":"complete_openai",
+  "url":"http://127.0.0.1:8000/v1/chat/completions",
+  "access_key":"sk-test",
+  "provider":"openai",
+  "request_model_name":"gpt-test"
+}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('embed_ep', '{
+  "ai_model_name":"embed_openai",
+  "url":"http://127.0.0.1:8000/v1/embeddings",
+  "access_key":"sk-test",
+  "provider":"OPENAI",
+  "request_model_name":"embed-test"
+}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('rerank_ep', '{
+  "ai_model_name":"rerank_model",
+  "url":"http://127.0.0.1:8000/v1/rerank",
+  "access_key":"sk-test",
+  "provider":"siliconflow",
+  "request_model_name":"rerank-test"
+}');
+
+--error 11114
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ollama_complete_ep', '{
+  "ai_model_name":"ollama_complete",
+  "url":"http://127.0.0.1:8000/api/generate",
+  "access_key":"",
+  "provider":"openai",
+  "request_model_name":"llama3.1"
+}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ollama_complete_ep', '{
+  "ai_model_name":"ollama_complete",
+  "url":"http://127.0.0.1:8000/api/generate",
+  "access_key":"",
+  "provider":"ollama",
+  "request_model_name":"llama3.1"
+}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ollama_embed_ep', '{
+  "ai_model_name":"ollama_embed",
+  "url":"http://127.0.0.1:8000/api/embed",
+  "access_key":"",
+  "provider":"Ollama",
+  "request_model_name":"nomic-embed"
+}');
+select ENDPOINT_NAME, PROVIDER, ACCESS_KEY = '', URL from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS where ENDPOINT_NAME in ('ollama_complete_ep', 'ollama_embed_ep') order by ENDPOINT_NAME;
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT('ollama_complete_ep', '{"url":"http://127.0.0.1:8000/api/generate"}');
+select URL from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS where ENDPOINT_NAME = 'ollama_complete_ep';
+
+# AI_PROMPT expansion through AI_COMPLETE: plain text, prompt object, nested prompt, repeated placeholder, JSON, unicode, escapes, NULL config, temperature and max_tokens
+select ai_complete('complete_openai', 'hello');
+select ai_complete('complete_openai', ai_prompt('Say {0}', 'hi'));
+select ai_complete('complete_openai', ai_prompt('A{0}B', ai_prompt('[{0}]', 'z')));
+select ai_complete('complete_openai', ai_prompt('{0}-{0}', 'x'));
+select ai_complete('complete_openai', ai_prompt('v={0}', json_array('a', 'b')));
+select ai_complete('complete_openai', ai_prompt('你好{0}', '世界'));
+select ai_complete('complete_openai', ai_prompt('pre\\{0\\}post', 'NO'));
+select ai_complete('complete_openai', 'hello', NULL);
+select ai_complete('complete_openai', 'hello', '{"temperature":0.2,"max_tokens":16}');
+select ai_complete('complete_openai', repeat('x', 64));
+--error 1210,4070
+--disable_result_log
+select ai_complete('complete_openai', 'BAD_EMPTY');
+--enable_result_log
+
+# Ollama native completion and embedding. stream is forced off by the provider.
+select ai_complete('ollama_complete', 'hello');
+select ai_embed('ollama_embed', 'a');
+
+# AI_EMBED single row, explicit dimension, NULL propagation, filter and LIMIT.
+select ai_embed('embed_openai', 'b');
+select ai_embed('embed_openai', 'a', 2);
+--disable_warnings
+drop table if exists t_embed_small;
+--enable_warnings
+create table t_embed_small(id int primary key, c varchar(20));
+insert into t_embed_small values (1, 'a'), (2, NULL), (3, 'c');
+select id, ai_embed('embed_openai', c) from t_embed_small order by id;
+select ai_embed('embed_openai', c) from t_embed_small where id <> 2 order by id;
+select ai_embed('embed_openai', c) from t_embed_small where id <> 2 order by id limit 1;
+--error 1210,4070
+--disable_result_log
+select ai_embed('embed_openai', 'a', 0);
+select ai_embed('embed_openai', 'BAD_DIM', 2);
+--enable_result_log
+
+# Cross-row batch: 33 inputs cross the 32-input request size and the mock returns reversed indexes.
+--disable_warnings
+drop table if exists t_embed_batch;
+--enable_warnings
+create table t_embed_batch(id int primary key, c varchar(20));
+insert into t_embed_batch values
+(0,'r0'),(1,'r1'),(2,'r2'),(3,'r3'),(4,'r4'),(5,'r5'),(6,'r6'),(7,'r7'),
+(8,'r8'),(9,'r9'),(10,'r10'),(11,'r11'),(12,'r12'),(13,'r13'),(14,'r14'),(15,'r15'),
+(16,'r16'),(17,'r17'),(18,'r18'),(19,'r19'),(20,'r20'),(21,'r21'),(22,'r22'),(23,'r23'),
+(24,'r24'),(25,'r25'),(26,'r26'),(27,'r27'),(28,'r28'),(29,'r29'),(30,'r30'),(31,'r31'),
+(32,'r32');
+select id, ai_embed('embed_openai', c) from t_embed_batch order by id;
+--error 1210,4070,4216
+--disable_result_log
+select ai_embed('embed_openai', case when id = 0 then 'FAIL' else c end) from t_embed_batch where id < 2;
+--enable_result_log
+
+# AI_RERANK string array and object array. 21 documents cross the 20-document batch.
+select ai_rerank('rerank_model', 'q', json_array('d0','d1','d2','d3','d4','d5','d6','d7','d8','d9','d10','d11','d12','d13','d14','d15','d16','d17','d18','d19','d20'));
+select ai_rerank('rerank_model', 'q', json_array(json_object('id','a','text','s1'), json_object('id','b','text','s3'), json_object('id','c','text','s3')), 'text');
+
+drop table t_embed_small;
+drop table t_embed_batch;
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('complete_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('embed_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('rerank_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ollama_complete_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ollama_embed_ep');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('complete_openai');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('embed_openai');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('rerank_model');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('ollama_complete');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('ollama_embed');

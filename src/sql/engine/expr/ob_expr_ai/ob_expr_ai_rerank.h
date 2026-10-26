@@ -36,6 +36,7 @@ public:
                                 int64_t param_num,
                                 common::ObExprTypeCtx &type_ctx) const override;
   static int eval_ai_rerank(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res);
+  friend class ObAIFuncOpenAIUtilsTest;
 
   virtual int cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
                       ObExpr &rt_expr) const override;
@@ -55,6 +56,32 @@ private:
                                          common::ObString &doc_key, const common::ObAIFuncExprInfo &info, const share::ObAiModelEndpointInfo &endpoint_info, ObDatum &res);
   static int get_doc_array_from_documents_array_with_key(ObIAllocator &allocator, ObJsonArray *document_object_array, ObString &doc_key, ObJsonArray *&doc_array);
   static int sort_document_array_by_model_result(common::ObIAllocator &allocator, common::ObJsonArray *document_array, common::ObJsonArray *model_result_array, common::ObJsonArray *&sorted_document_array);
+public:
+  struct RerankHit {
+    int64_t index_;
+    double score_;
+    common::ObJsonNode *node_;
+  };
+  static int absorb_rerank_batch_result(common::ObIAllocator &allocator,
+                                       common::ObJsonArray *batch_result,
+                                       int64_t start,
+                                       int64_t batch_len,
+                                       int64_t doc_count,
+                                       char *seen,
+                                       RerankHit *hits,
+                                       int64_t &collected);
+  static void sort_rerank_hits(RerankHit *hits, int64_t count);
+  static int collect_rerank_hits(common::ObIAllocator &allocator,
+                                 const common::ObAIFuncExprInfo &info,
+                                 const share::ObAiModelEndpointInfo &endpoint_info,
+                                 common::ObArray<common::ObString> &header_array,
+                                 common::ObString &query,
+                                 common::ObJsonArray *text_array,
+                                 RerankHit *&hits,
+                                 int64_t &hit_count);
+  static int append_sorted_hit_nodes(common::ObIAllocator &allocator, RerankHit *hits, int64_t hit_count, common::ObJsonArray *&result_array);
+  static int build_sorted_object_docs(common::ObIAllocator &allocator, common::ObJsonArray *document_array, RerankHit *hits, int64_t hit_count, common::ObJsonArray *&sorted_document_array);
+private:
   static int construct_config_json(common::ObIAllocator &allocator, int64_t top_k, int64_t return_doc, common::ObJsonObject *&config_json);
   static int construct_batch_document_array(common::ObIAllocator &allocator, common::ObJsonArray *document_array, int64_t start_idx, int64_t end_idx, common::ObJsonArray *&batch_document_array);
   static int batch_result_add_base(common::ObIAllocator &allocator, common::ObJsonArray *array, int64_t start_idx);

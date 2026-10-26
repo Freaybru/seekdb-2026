@@ -1,0 +1,29 @@
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+package(default_testonly = True)
+
+cc_test(
+    name = "ob_expr_ai_prompt_test",
+    size = "small",
+    srcs = ["ob_expr_ai_prompt_test.cpp"],
+    features = ["-static_cpp_runtime", "-static_link_cpp_runtimes"],
+    linkstatic = True,
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "//bazel/third_party:gtest",
+        "//src/observer:liboceanbase",
+    ],
+)
+
+cc_test(
+    name = "test_ob_openai_utils",
+    size = "small",
+    srcs = ["test_ob_openai_utils.cpp"],
+    features = ["-static_cpp_runtime", "-static_link_cpp_runtimes"],
+    linkstatic = True,
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "//bazel/third_party:gtest",
+        "//src/observer:liboceanbase",
+    ],
+)
