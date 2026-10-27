@@ -28,6 +28,12 @@ namespace common
 template<class T>
     int databuff_print_obj_array(char *buf, const int64_t buf_len, int64_t &pos,
                                  const T *obj, const int64_t size);  // from ob_print_utils.h
+// Out-of-line cold failure path of ObIArrayWrap::at(): keeping the logging / backtrace /
+// abort code out of at() lets the compiler inline the (hot) bounds-checked accessor.
+inline __attribute__((noinline, cold)) void ob_array_wrap_index_fail(const int64_t idx, const int64_t count_)
+{
+  OB_ASSERT(idx >= 0 && idx < count_);
+}
 /// Utility tempalte class to adapt C array to an object, which can be used with databuff_print_obj
 template <typename T>
 class ObIArrayWrap
@@ -42,7 +48,9 @@ public:
 #ifndef NDEBUG
     extra_access_check();
 #endif
-    OB_ASSERT(idx >= 0 && idx < count_);
+    if (OB_UNLIKELY(idx < 0 || idx >= count_)) {
+      ob_array_wrap_index_fail(idx, count_);
+    }
     return data_[idx];
   }
   inline T &at(int64_t idx)
@@ -50,7 +58,9 @@ public:
 #ifndef NDEBUG
     extra_access_check();
 #endif
-    OB_ASSERT(idx >= 0 && idx < count_);
+    if (OB_UNLIKELY(idx < 0 || idx >= count_)) {
+      ob_array_wrap_index_fail(idx, count_);
+    }
     return data_[idx];
   }
   inline int64_t count() const { return count_; }
