@@ -18,6 +18,11 @@
 7. **utf8mb4_general_ci 比较的 ASCII 快路径**（`ob_strnncollsp_utf8mb4`）：两侧都是 ASCII 时跳过 mb_wc 解码，
    权重仍经 `ob_tosort_unicode`，结果与原实现一致。
 
+8. **`ObIArrayWrap::at` 失败路径外提 + `ObBitVector::at/set/unset` always_inline**（v5）：
+   `at()` 里内联的 OB_ASSERT（日志/回溯/abort）使编译器拒绝内联这个热点访问器
+   （排序比较、DaaT 合并、表达式批处理处处使用，perf 中单独占 3~6%）。把失败路径放到 cold/noinline 函数，
+   语义（越界即日志+abort）不变。对 MATCH 查询约 -18% CPU，对 build 约 -5%。
+
 ## 正确性
 
 - `ref/gen_ref.sh`：TOKENIZE（ik/beng/space/ngram/ngram2 × 6 文本 × 属性）与 MATCH（计数、Top50 分数、全量 id+分数 MD5）
@@ -28,7 +33,13 @@
 
 ## 本地结果（本机基线 vs 当前）
 
-见 progress.md / `fts-runs/*.score`。v4 两次运行：local_score 27.6 / 34.7；v3 约 13–27（噪声大）。
+见 progress.md / `fts-runs/*.score`（本机基线 vs 当前，4 次顺序运行）：
+
+| 版本 | build | tokenize | query | local_score |
+|---|---|---|---|---|
+| v3 | ~18% | ~3% | ~1% | 13–27（噪声大）|
+| v4 | ~22% | ~12% | ~3% | 中位 24（5 次：27.6/34.7/24.2/22.3/12.8）|
+| v5 | ~27% | ~16% | ~20% | 中位 ~42（40.9/43.6/40.1/43.5）|
 
 ## 没有收益 / 放弃的方向
 
