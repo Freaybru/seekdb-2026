@@ -51,7 +51,9 @@ private:
   ObObjMeta meta_;
 };
 
-typedef common::hash::ObHashMap<ObFTWord, int64_t> ObFTWordMap;
+// Word maps are always private to one tokenization call / one document, so no
+// bucket latch is needed (avoids a latch lock/unlock per insert, lookup and clear).
+typedef common::hash::ObHashMap<ObFTWord, int64_t, common::hash::NoPthreadDefendMode> ObFTWordMap;
 
 class ObAddWordFlag final
 {

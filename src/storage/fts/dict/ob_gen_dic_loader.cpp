@@ -125,6 +125,19 @@ int ObGenDicLoader::get_dic_loader(const ObString &parser_name,
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(dic_loader_key.init(parser_name, charset))) {
   } else {
+    // fast path: the loader normally exists already, a read lock is enough to
+    // look it up and take a reference (set_loader increases the ref count).
+    TCRLockGuard rguard(lock_);
+    if (OB_FAIL(dic_loader_map_.get_refactored(dic_loader_key, dic_loader))) {
+      if (OB_HASH_NOT_EXIST == ret) {
+        ret = OB_SUCCESS;
+        dic_loader = nullptr;
+      }
+    } else if (OB_FAIL(loader_handle.set_loader(dic_loader))) {
+    }
+  }
+  if (OB_FAIL(ret) || nullptr != dic_loader) {
+  } else {
     TCWLockGuard guard(lock_);
     if (OB_FAIL(dic_loader_map_.get_refactored(dic_loader_key, dic_loader))) {
       if (OB_HASH_NOT_EXIST == ret) {

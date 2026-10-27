@@ -378,19 +378,31 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
   return last_hit.dict_->match_with_hit(single_word, last_hit, hit);
 }
 
+// Same result as ObCharset::strcmp(CS_TYPE_UTF8MB4_BIN, l, r): utf8mb4_bin strnncoll is a
+// plain byte-wise compare (memcmp on the common prefix, then the shorter string first),
+// done inline to avoid the charset dispatch for every CJK char on the IK hot path.
+static OB_INLINE int ft_range_bin_cmp(const ObString &l, const ObString &r)
+{
+  const int64_t l_len = l.length();
+  const int64_t r_len = r.length();
+  const int64_t min_len = l_len < r_len ? l_len : r_len;
+  int cmp = 0;
+  if (min_len > 0) {
+    cmp = memcmp(l.ptr(), r.ptr(), min_len);
+  }
+  if (0 == cmp) {
+    cmp = (l_len == r_len) ? 0 : (l_len < r_len ? -1 : 1);
+  }
+  return cmp;
+}
+
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
 {
   int ret = OB_SUCCESS;
   bool found = false;
   for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
+    if (ft_range_bin_cmp(range_dicts_[i].start_.get_word(), single_word) <= 0
+        && ft_range_bin_cmp(range_dicts_[i].end_.get_word(), single_word) >= 0) {
       dict = range_dicts_[i].dict_;
       found = true;
     }
