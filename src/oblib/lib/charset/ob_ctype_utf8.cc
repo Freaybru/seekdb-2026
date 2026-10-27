@@ -382,6 +382,24 @@ static int ob_strnncollsp_utf8mb4(const ObCharsetInfo *cs,
   const unsigned char *se= src + srclen, *te= dst + dstlen;
   ObUnicaseInfo *uni_plane= cs->caseinfo;
   while ( src < se && dst < te ) {
+    if ( *src < 0x80 && *dst < 0x80 ) {
+      // ASCII fast path: single byte characters decode to themselves.
+      if ( *src == *dst ) {
+        ++src;
+        ++dst;
+        continue;
+      }
+      src_wc = *src;
+      dst_wc = *dst;
+      ob_tosort_unicode(uni_plane, &src_wc, cs->state);
+      ob_tosort_unicode(uni_plane, &dst_wc, cs->state);
+      if ( src_wc != dst_wc ) {
+        return src_wc > dst_wc ? 1 : -1;
+      }
+      ++src;
+      ++dst;
+      continue;
+    }
     int s_res= ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
     int t_res= ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
     if ( s_res <= 0 || t_res <= 0 ) {

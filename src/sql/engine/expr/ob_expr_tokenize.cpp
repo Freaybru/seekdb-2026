@@ -212,25 +212,62 @@ int ObExprTokenize::parse_param(const ObExpr &expr,
   } else if (OB_FAIL(parse_fulltext(expr, ctx, param))) {
   } else if (OB_FAIL(parse_parser_name(expr, ctx, param))) {
   } else if (OB_FAIL(parse_parser_properties(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(param.reform_parser_properties(param.properties_))) {
+  } else if (OB_FAIL(param.reform_parser_properties_memo())) {
   } else if (OB_FAIL(param.try_load_dictionary_for_ik())) {
   }
   return ret;
 }
 
+namespace
+{
+// Per-thread memo of the last (raw parser name -> inner parser name) mapping and of
+// the last (inner parser name, empty user properties -> normalized properties) mapping.
+// Both mappings are pure functions of their inputs, so replaying them is exactly
+// equivalent to recomputing them on every call.
+struct TokenizeParamMemo
+{
+  static constexpr int64_t RAW_CAP = 64;
+  static constexpr int64_t PROPS_CAP = 512;
+  char raw[RAW_CAP];
+  int64_t raw_len = -1;
+  char inner[storage::OB_FT_PARSER_NAME_LENGTH];
+  int64_t inner_len = 0;
+  char props_key[storage::OB_FT_PARSER_NAME_LENGTH];
+  int64_t props_key_len = -1;
+  char props[PROPS_CAP];
+  int64_t props_len = 0;
+};
+static thread_local TokenizeParamMemo tl_tokenize_memo;
+} // namespace
+
 int ObExprTokenize::construct_ft_parser_inner_name(const ObString &input_str, TokenizeParam &param)
 {
   int ret = OB_SUCCESS;
-  storage::ObFTParser parser;
+  TokenizeParamMemo &memo = tl_tokenize_memo;
 
   char *parser_name_buf = nullptr;
   if (OB_ISNULL(parser_name_buf
                 = static_cast<char *>(param.allocator_.alloc(storage::OB_FT_PARSER_NAME_LENGTH)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (OB_FAIL(parser.init(input_str))) {
-  } else if (OB_FAIL(parser.serialize_to_str(parser_name_buf, storage::OB_FT_PARSER_NAME_LENGTH))) {
-  } else {
+  } else if (memo.raw_len == input_str.length() && input_str.length() > 0
+             && 0 == MEMCMP(memo.raw, input_str.ptr(), input_str.length())) {
+    MEMCPY(parser_name_buf, memo.inner, memo.inner_len + 1);
     param.parser_name_ = ObString::make_string(parser_name_buf);
+  } else {
+    storage::ObFTParser parser;
+    if (OB_FAIL(parser.init(input_str))) {
+    } else if (OB_FAIL(parser.serialize_to_str(parser_name_buf, storage::OB_FT_PARSER_NAME_LENGTH))) {
+    } else {
+      param.parser_name_ = ObString::make_string(parser_name_buf);
+      const int64_t inner_len = param.parser_name_.length();
+      if (input_str.length() > 0 && input_str.length() <= TokenizeParamMemo::RAW_CAP
+          && inner_len < storage::OB_FT_PARSER_NAME_LENGTH) {
+        MEMCPY(memo.raw, input_str.ptr(), input_str.length());
+        memo.raw_len = input_str.length();
+        MEMCPY(memo.inner, parser_name_buf, inner_len + 1);
+        memo.inner_len = inner_len;
+      }
+    }
   }
   return ret;
 }
@@ -369,6 +406,39 @@ int ObExprTokenize::parse_parser_properties(const ObExpr &expr,
     }
   }
 
+  return ret;
+}
+
+int ObExprTokenize::TokenizeParam::reform_parser_properties_memo()
+{
+  int ret = OB_SUCCESS;
+  TokenizeParamMemo &memo = tl_tokenize_memo;
+  if (properties_.empty() && memo.props_key_len == parser_name_.length()
+      && 0 == MEMCMP(memo.props_key, parser_name_.ptr(), parser_name_.length())) {
+    if (memo.props_len == 0) {
+      properties_ = ObString();
+    } else {
+      char *buf = static_cast<char *>(allocator_.alloc(memo.props_len));
+      if (OB_ISNULL(buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        MEMCPY(buf, memo.props, memo.props_len);
+        properties_.assign_ptr(buf, memo.props_len);
+      }
+    }
+  } else {
+    const bool memoizable = properties_.empty();
+    if (OB_FAIL(reform_parser_properties(properties_))) {
+    } else if (memoizable && parser_name_.length() < storage::OB_FT_PARSER_NAME_LENGTH
+               && properties_.length() <= TokenizeParamMemo::PROPS_CAP) {
+      MEMCPY(memo.props_key, parser_name_.ptr(), parser_name_.length());
+      memo.props_key_len = parser_name_.length();
+      if (properties_.length() > 0) {
+        MEMCPY(memo.props, properties_.ptr(), properties_.length());
+      }
+      memo.props_len = properties_.length();
+    }
+  }
   return ret;
 }
 

@@ -299,18 +299,45 @@ template class ObFTDATReader<void>;
 
 ObArrayHashMap *ObFTDAT::get_map() { return reinterpret_cast<ObArrayHashMap *>(buff); }
 
+namespace
+{
+// A single dictionary character is at most MAX_MB_LEN (<= 8) bytes. Fold it into a
+// 64-bit word and mix it; the same function is used by insert() and find(), and the
+// table only lives in memory, so the layout is free to change.
+OB_INLINE uint64_t single_word_hash(const char *ptr, int32_t len)
+{
+  uint64_t v = static_cast<uint64_t>(static_cast<uint8_t>(len)) << 56;
+  uint64_t tmp = 0;
+  MEMCPY(&tmp, ptr, len > 7 ? 7 : len);
+  v ^= tmp;
+  v *= 0x9E3779B97F4A7C15ULL;
+  return v ^ (v >> 29);
+}
+
+OB_INLINE uint32_t reduce_range(uint64_t hash, uint32_t capacity)
+{
+  return static_cast<uint32_t>((static_cast<uint64_t>(static_cast<uint32_t>(hash >> 32)) * capacity) >> 32);
+}
+
+OB_INLINE uint32_t next_slot(uint32_t index, uint32_t capacity)
+{
+  index += 3;
+  return index >= capacity ? index - capacity : index;
+}
+} // namespace
+
 int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
 {
   int ret = OB_ENTRY_NOT_EXIST;
-  uint64_t hash = word.get_word().hash();
-  uint64_t index = hash % header_.capacity_;
+  const uint32_t capacity = header_.capacity_;
+  uint32_t index = reduce_range(single_word_hash(word.word, word.word_len), capacity);
   while (header_.data[index].used) {
     if (header_.data[index].word == word) {
       code = header_.data[index].code;
       ret = OB_SUCCESS;
       break;
     } else {
-      index = (index + 3) % header_.capacity_;
+      index = next_slot(index, capacity);
     }
   }
   return ret;
@@ -319,10 +346,10 @@ int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
 int ObArrayHashMap::insert(const ObString &key, ObFTWordCode code)
 {
   int ret = OB_SUCCESS;
-  uint64_t hash = key.hash();
-  uint64_t index = hash % header_.capacity_;
+  const uint32_t capacity = header_.capacity_;
+  uint32_t index = reduce_range(single_word_hash(key.ptr(), key.length()), capacity);
   while (header_.data[index].used) {
-    index = (index + 3) % header_.capacity_;
+    index = next_slot(index, capacity);
   }
 
   header_.data[index].code = code;
