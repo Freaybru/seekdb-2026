@@ -194,6 +194,40 @@ int finish_local_text(const int ret, const int64_t pos, ObMySQLCellValue &out) {
 
 } // namespace
 
+namespace {
+struct JsonTextMemo
+{
+  static constexpr int64_t BIN_CAP = 4096;
+  static constexpr int64_t TEXT_CAP = 8192;
+  JsonTextMemo() : valid_(false), bin_len_(0), text_len_(0) {}
+  bool match(const ObString &bin) const
+  {
+    return valid_ && bin.length() == bin_len_ && 0 == MEMCMP(bin.ptr(), bin_, bin_len_);
+  }
+  void store(const ObString &bin, const char *text, const int64_t text_len)
+  {
+    if (bin.length() <= 0 || bin.length() > BIN_CAP || text_len < 0 || text_len > TEXT_CAP
+        || (text_len > 0 && nullptr == text)) {
+      valid_ = false;
+    } else {
+      MEMCPY(bin_, bin.ptr(), bin.length());
+      bin_len_ = bin.length();
+      if (text_len > 0) {
+        MEMCPY(text_, text, text_len);
+      }
+      text_len_ = text_len;
+      valid_ = true;
+    }
+  }
+  bool valid_;
+  int64_t bin_len_;
+  int64_t text_len_;
+  char bin_[BIN_CAP];
+  char text_[TEXT_CAP];
+};
+static thread_local JsonTextMemo tl_json_text_memo;
+} // anonymous namespace
+
 int ObSMUtils::build_cell_value(const ObObj &obj, MYSQL_PROTOCOL_TYPE type,
                                 ObIAllocator &scratch_allocator,
                                 ObMySQLCellValue &out,
@@ -462,18 +496,28 @@ int ObSMUtils::build_cell_value(const ObObj &obj, MYSQL_PROTOCOL_TYPE type,
       } else if (OB_UNLIKELY(value.length() < 0 || NULL == value.ptr())) {
         ret = OB_ERR_UNEXPECTED;
       } else {
-        lib::ObMemAttr mem_attr("JsonAlloc");
-        ObArenaAllocator allocator(mem_attr);
-        ObJsonBin json_bin(value.ptr(), value.length(), &allocator);
-        ObIJsonBase *json_base = &json_bin;
-        ObJsonBuffer json_buf(&allocator);
-        json_bin.set_seek_flag(true);
-        if (OB_FAIL(json_bin.reset_iter())) {
-        } else if (OB_FAIL(json_base->print(json_buf, true, value.length()))) {
-        } else {
+        // Per-thread memo of the last JSON binary -> text rendering. The text is a
+        // pure function of the binary bytes, so an exact byte match reuses it.
+        JsonTextMemo &memo = tl_json_text_memo;
+        if (memo.match(value)) {
           ret = set_copied_bytes(scratch_allocator,
                                  ObMySQLCellValueKind::LENENC_BYTES,
-                                 json_buf.ptr(), json_buf.length(), out);
+                                 memo.text_, memo.text_len_, out);
+        } else {
+          lib::ObMemAttr mem_attr("JsonAlloc");
+          ObArenaAllocator allocator(mem_attr);
+          ObJsonBin json_bin(value.ptr(), value.length(), &allocator);
+          ObIJsonBase *json_base = &json_bin;
+          ObJsonBuffer json_buf(&allocator);
+          json_bin.set_seek_flag(true);
+          if (OB_FAIL(json_bin.reset_iter())) {
+          } else if (OB_FAIL(json_base->print(json_buf, true, value.length()))) {
+          } else {
+            memo.store(value, json_buf.ptr(), json_buf.length());
+            ret = set_copied_bytes(scratch_allocator,
+                                   ObMySQLCellValueKind::LENENC_BYTES,
+                                   json_buf.ptr(), json_buf.length(), out);
+          }
         }
       }
       break;
