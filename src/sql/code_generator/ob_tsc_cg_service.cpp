@@ -1829,7 +1829,7 @@ int ObTscCgService::generate_text_ir_ctdef(const ObLogTableScan &op,
   }
 
   if (OB_FAIL(ret)) {
-  } else if (tr_info.need_calc_relevance_) {
+  } else if (tr_info.exec_need_relevance_) {
     ObDASScanCtDef *inv_idx_agg_ctdef = nullptr;
     ObDASScanCtDef *doc_agg_ctdef = nullptr;
     ObDASScanCtDef *block_max_scan_ctdef = nullptr;
@@ -1888,7 +1888,7 @@ int ObTscCgService::generate_text_ir_ctdef(const ObLogTableScan &op,
       ret = OB_ALLOCATE_MEMORY_FAILED;
     } else {
       ir_scan_ctdef->children_cnt_ = 1;
-      ir_scan_ctdef->children_[0] = &scan_ctdef;
+      ir_scan_ctdef->children_[0] = inv_idx_scan_ctdef;
     }
   }
 
@@ -2999,8 +2999,8 @@ int ObTscCgService::generate_text_ir_spec_exprs(const ObTextRetrievalInfo &tr_in
 {
   int ret = OB_SUCCESS;
   ObSEArray<ObExpr *, 4> result_output;
-  if (OB_ISNULL(tr_info.match_expr_) || OB_ISNULL(tr_info.relevance_expr_) ||
-      OB_ISNULL(tr_info.docid_or_rowkey_column_)) {
+  if (OB_ISNULL(tr_info.match_expr_) || OB_ISNULL(tr_info.docid_or_rowkey_column_) ||
+      (tr_info.exec_need_relevance_ && OB_ISNULL(tr_info.relevance_expr_))) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(cg_.mark_expr_self_produced(tr_info.match_expr_))) {
   } else if (OB_FAIL(cg_.generate_rt_expr(*tr_info.match_expr_->get_search_key(), text_ir_scan_ctdef.search_text_))) {
@@ -3040,12 +3040,14 @@ int ObTscCgService::generate_text_ir_spec_exprs(const ObTextRetrievalInfo &tr_in
     }
   }
 
-  if (OB_SUCC(ret) && nullptr != tr_info.pushdown_match_filter_) {
+  // EXPLAIN still shows pushdown_match_filter from tr_info; only wire the runtime
+  // match_filter when accurate relevance is required (otherwise IR already filters).
+  if (OB_SUCC(ret) && tr_info.exec_need_relevance_ && nullptr != tr_info.pushdown_match_filter_) {
     if (OB_FAIL(cg_.generate_rt_expr(*tr_info.pushdown_match_filter_, text_ir_scan_ctdef.match_filter_))) {
     }
   }
 
-  if (OB_SUCC(ret) && tr_info.need_calc_relevance_) {
+  if (OB_SUCC(ret) && tr_info.exec_need_relevance_) {
     if (OB_ISNULL(tr_info.relevance_expr_)) {
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(cg_.generate_rt_expr(*tr_info.relevance_expr_, text_ir_scan_ctdef.relevance_expr_))) {
@@ -3057,7 +3059,7 @@ int ObTscCgService::generate_text_ir_spec_exprs(const ObTextRetrievalInfo &tr_in
     }
   }
 
-  if (OB_SUCC(ret) && (tr_info.need_calc_relevance_ || nullptr != tr_info.pushdown_match_filter_)) {
+  if (OB_SUCC(ret) && tr_info.exec_need_relevance_) {
     if (OB_FAIL(cg_.generate_rt_expr(*tr_info.match_expr_,
                                             text_ir_scan_ctdef.relevance_proj_col_))) {
     } else if (OB_ISNULL(text_ir_scan_ctdef.relevance_proj_col_)) {

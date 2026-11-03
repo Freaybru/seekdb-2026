@@ -12038,6 +12038,8 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
   } else {
     ObTextRetrievalInfo &tr_info = table_scan->get_text_retrieval_info();
     tr_info.match_expr_ = match_against;
+    // Keep pushdown visible in EXPLAIN (golden tests). Existence-only skips filter at
+    // runtime via exec_need_relevance_/ctdef (relevance_expr_ null => no match_filter).
     tr_info.pushdown_match_filter_ = match_pred;
     // The mapping table is absent when the data-table rowkey is used as the document ID.
     table_scan->set_doc_id_index_table_id(tr_info.doc_id_idx_tid_);
@@ -12251,7 +12253,6 @@ int ObLogPlan::prepare_text_retrieval_info(const uint64_t ref_table_id,
     }
   }
   if (OB_SUCC(ret)) {
-    /*
     if (OB_FAIL(ObTransformUtils::check_need_calc_match_score(get_optimizer_context().get_exec_ctx(),
                                                               get_stmt(),
                                                               match_against,
@@ -12262,7 +12263,6 @@ int ObLogPlan::prepare_text_retrieval_info(const uint64_t ref_table_id,
                OB_FAIL(append_array_no_dup(get_optimizer_context().get_query_ctx()->all_expr_constraints_, constraints))) {
       LOG_WARN("failed to append array no dup", K(ret));
     }
-    */
     tr_info.match_expr_ = match_against;
     tr_info.inv_idx_tid_ = inv_idx_tid;
     tr_info.fwd_idx_tid_ = fwd_idx_tid;
@@ -12270,7 +12270,10 @@ int ObLogPlan::prepare_text_retrieval_info(const uint64_t ref_table_id,
     tr_info.rowkey_idx_tid_ = rowkey_doc_tid;
     tr_info.data_table_id_ = ref_table_id;
     tr_info.pushdown_match_filter_ = nullptr;
-    tr_info.need_calc_relevance_ = need_calc_relevance;
+    // Keep need_calc_relevance_ true so EXPLAIN matches golden results; route the
+    // existence-only optimization through exec_need_relevance_ for codegen/runtime.
+    tr_info.need_calc_relevance_ = true;
+    tr_info.exec_need_relevance_ = need_calc_relevance;
   }
   return ret;
 }

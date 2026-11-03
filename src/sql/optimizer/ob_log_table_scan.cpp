@@ -482,7 +482,17 @@ int ObLogTableScan::generate_access_exprs()
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(copy_filter_before_index_back())) {
   } else if (OB_FAIL(generate_necessary_rowkey_and_partkey_exprs())) {
-  } else if (is_text_retrieval_scan() && OB_FAIL(prepare_text_retrieval_dep_exprs(get_text_retrieval_info()))) {
+  } else if (is_text_retrieval_scan()) {
+    ObTextRetrievalInfo &tr_info = get_text_retrieval_info();
+    // Existence-only DaaT is not wired for index_back/aux_lookup (4016). Force BM25
+    // execution for SELECT projecting base columns; COUNT(*) keeps index_back=false.
+    if (get_index_back() && !tr_info.exec_need_relevance_) {
+      tr_info.exec_need_relevance_ = true;
+    }
+    if (OB_FAIL(prepare_text_retrieval_dep_exprs(tr_info))) {
+    }
+  }
+  if (OB_FAIL(ret)) {
   } else if (is_vec_idx_scan() && OB_FAIL(prepare_vector_access_exprs())) {
   } else if (is_tsc_with_domain_id() && OB_FAIL(prepare_rowkey_domain_id_dep_exprs())) {
   } else if ((has_func_lookup() || (is_vec_idx_scan() && (is_text_retrieval_scan() || get_merge_tr_infos().count() > 0))) && OB_FAIL(prepare_func_lookup_dep_exprs())) {
