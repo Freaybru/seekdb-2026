@@ -33,6 +33,7 @@ struct ObStringDiffHeader;
 class ObStringDiffDecoder : public ObIColumnDecoder
 {
 public:
+  static const int64_t FAST_FIX_MAX_STR_SIZE = 64;
   static const ObColumnHeader::Type type_ = ObColumnHeader::STRING_DIFF;
 
   ObStringDiffDecoder();

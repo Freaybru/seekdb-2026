@@ -19,6 +19,7 @@
 
 #include "ob_i_sparse_retrieval_iter.h"
 #include "ob_sparse_utils.h"
+#include "ob_sparse_retrieval_util.h"
 #include "storage/access/ob_scan_merge_loser_tree.h"
 #include "storage/access/ob_simple_rows_merger.h"
 
@@ -44,7 +45,24 @@ struct ObSRMergeCmp
   virtual ~ObSRMergeCmp() {}
 
   int init(sql::ObDatumMeta id_meta, const ObFixedArray<const ObDatum *, ObIAllocator> *iter_ids);
-  int cmp(const ObSRMergeItem &l, const ObSRMergeItem &r, int64_t &cmp_ret);
+  OB_INLINE int cmp(const ObSRMergeItem &l, const ObSRMergeItem &r, int64_t &cmp_ret)
+  {
+    int ret = OB_SUCCESS;
+    if (OB_UNLIKELY(!is_inited_)) {
+      ret = OB_NOT_INIT;
+    } else {
+      int tmp_ret = 0;
+      const ObDatum &ld = get_id_datum(l.iter_idx_);
+      const ObDatum &rd = get_id_datum(r.iter_idx_);
+      if (fast_bin_ && ob_sr_fast_bin16_cmp(ld, rd, tmp_ret)) {
+        cmp_ret = tmp_ret;
+      } else if (OB_FAIL(cmp_func_(ld, rd, tmp_ret, nullptr))) {
+      } else {
+        cmp_ret = tmp_ret;
+      }
+    }
+    return ret;
+  }
 private:
   inline const ObDatum &get_id_datum(const int64_t iter_idx)
   {
@@ -57,6 +75,7 @@ private:
   // TODO: if memory lifetime of docid datum is guaranteed by dim_iters, we can use pointer to datum directly
   //       and avoid deep copy into merge heap here
   const ObFixedArray<const ObDatum *, ObIAllocator> *iter_ids_;
+  bool fast_bin_;
   bool is_inited_;
 };
 
