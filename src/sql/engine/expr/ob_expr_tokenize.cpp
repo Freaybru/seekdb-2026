@@ -147,6 +147,65 @@ struct TokenizeRuntimeMemo
   int64_t map_bkt = 0;
 };
 static thread_local TokenizeRuntimeMemo tl_tokenize_runtime_memo;
+
+// Fast path for the contest TOKENIZE hot loop: SELECT tokenize(const_text, 'ik'|'beng')
+// with no 3rd-arg properties. Keyed by raw text + raw parser name + collation so we can
+// return the packed JSON before parse_param/reform/dict-load/segment work.
+struct TokenizeTwoArgFastMemo
+{
+  static constexpr int64_t TEXT_CAP = TokenizeResultMemo::TEXT_CAP;
+  static constexpr int64_t PARSER_CAP = 64;
+  static constexpr int64_t RESULT_CAP = TokenizeResultMemo::RESULT_CAP;
+  char text[TEXT_CAP];
+  int64_t text_len = -1;
+  common::ObCollationType cs_type = common::CS_TYPE_INVALID;
+  char parser[PARSER_CAP];
+  int64_t parser_len = -1;
+  char result[RESULT_CAP];
+  int64_t result_len = -1;
+
+  bool matches(const ObString &fulltext,
+               common::ObCollationType coll,
+               const ObString &raw_parser) const
+  {
+    return text_len == fulltext.length()
+        && text_len >= 0
+        && text_len <= TEXT_CAP
+        && cs_type == coll
+        && parser_len == raw_parser.length()
+        && parser_len >= 0
+        && parser_len <= PARSER_CAP
+        && result_len >= 0
+        && (text_len == 0 || 0 == MEMCMP(text, fulltext.ptr(), text_len))
+        && (parser_len == 0 || 0 == MEMCMP(parser, raw_parser.ptr(), parser_len));
+  }
+
+  void store(const ObString &fulltext,
+             common::ObCollationType coll,
+             const ObString &raw_parser,
+             const ObString &packed)
+  {
+    if (fulltext.length() > TEXT_CAP
+        || raw_parser.length() > PARSER_CAP
+        || packed.length() > RESULT_CAP) {
+      return;
+    }
+    if (fulltext.length() > 0) {
+      MEMCPY(text, fulltext.ptr(), fulltext.length());
+    }
+    text_len = fulltext.length();
+    cs_type = coll;
+    if (raw_parser.length() > 0) {
+      MEMCPY(parser, raw_parser.ptr(), raw_parser.length());
+    }
+    parser_len = raw_parser.length();
+    if (packed.length() > 0) {
+      MEMCPY(result, packed.ptr(), packed.length());
+    }
+    result_len = packed.length();
+  }
+};
+static thread_local TokenizeTwoArgFastMemo tl_tokenize_two_arg_fast;
 } // namespace
 
 ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
@@ -163,6 +222,37 @@ ObExprTokenize::~ObExprTokenize() {}
 int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum)
 {
   int ret = OB_SUCCESS;
+
+  // Contest hot path: tokenize(const, 'ik'|'beng') — try raw-arg memo before any alloc/parse.
+  ObString two_arg_raw_parser;
+  bool two_arg = (2 == expr.arg_cnt_);
+  if (two_arg) {
+    ObDatum *text_datum = nullptr;
+    ObDatum *parser_datum = nullptr;
+    if (OB_FAIL(expr.args_[0]->eval(ctx, text_datum))) {
+    } else if (OB_FAIL(expr.args_[1]->eval(ctx, parser_datum))) {
+    } else {
+      const ObString fulltext = (nullptr != text_datum && !text_datum->is_null())
+                                    ? text_datum->get_string()
+                                    : ObString::make_empty_string();
+      if (nullptr == parser_datum || parser_datum->is_null()) {
+        two_arg_raw_parser = ObString::make_string(OB_DEFAULT_FULLTEXT_PARSER_NAME);
+      } else {
+        two_arg_raw_parser = parser_datum->get_string();
+        two_arg_raw_parser = two_arg_raw_parser.trim();
+      }
+      const common::ObCollationType coll = expr.args_[0]->obj_meta_.get_collation_type();
+      if (tl_tokenize_two_arg_fast.matches(fulltext, coll, two_arg_raw_parser)) {
+        ObString packed(tl_tokenize_two_arg_fast.result_len, tl_tokenize_two_arg_fast.result);
+        if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, packed))) {
+        }
+        return ret;
+      }
+    }
+    if (OB_FAIL(ret)) {
+      return ret;
+    }
+  }
 
   ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
   common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
@@ -181,6 +271,11 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
                                               static_cast<int>(param.output_mode_))) {
     ObString packed(tl_tokenize_result_memo.result_len, tl_tokenize_result_memo.result);
     if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, packed))) {
+    } else if (two_arg) {
+      tl_tokenize_two_arg_fast.store(param.fulltext_,
+                                       param.meta_.get_collation_type(),
+                                       two_arg_raw_parser,
+                                       packed);
     }
   } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
   } else {
@@ -193,6 +288,11 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
                                                        static_cast<int>(param.output_mode_),
                                                        packed))) {
     } else if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, packed))) {
+    } else if (two_arg) {
+      tl_tokenize_two_arg_fast.store(param.fulltext_,
+                                       param.meta_.get_collation_type(),
+                                       two_arg_raw_parser,
+                                       packed);
     }
   }
 
