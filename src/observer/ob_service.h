@@ -38,7 +38,6 @@ namespace share
 struct ObTabletLocalChecksumItem;
 class ObDagScheduler;
 class ObIDag;
-class LocalStore;
 }
 namespace storage
 {
@@ -70,10 +69,8 @@ private:
 
 class TelemetryTask {
 public:
-  explicit TelemetryTask(share::LocalStore &store) : store_(store) {}
+  TelemetryTask() = default;
   int report();
-private:
-  share::LocalStore &store_;
 };
 
 class ObService : public rootserver::ObIRootserverLocalRuntime,
@@ -82,8 +79,7 @@ class ObService : public rootserver::ObIRootserverLocalRuntime,
 public:
   ObService(
       const share::ObGlobalContext &gctx,
-      query::ObIChangeStreamService &change_stream_service,
-      share::LocalStore &store);
+      query::ObIChangeStreamService &change_stream_service);
   virtual ~ObService();
 
   int init(common::ObMySQLProxy &sql_proxy);

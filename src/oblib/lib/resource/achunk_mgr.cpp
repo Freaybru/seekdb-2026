@@ -19,9 +19,6 @@
 #include "achunk_mgr.h"
 #include "lib/profile/ob_trace_id.h"
 #include "lib/utility/utility.h"
-#ifdef __EMSCRIPTEN__
-#include "lib/resource/wasm_memory.h"
-#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -156,9 +153,6 @@ void AChunkMgr::direct_free(const void *ptr, const uint64_t size)
 
 void *AChunkMgr::low_alloc(const uint64_t size)
 {
-#ifdef __EMSCRIPTEN__
-  return allocate_wasm_memory(size, ACHUNK_ALIGN_SIZE);
-#else
   void *ptr = nullptr;
   const int prot = PROT_READ | PROT_WRITE;
   const int flags = MAP_PRIVATE | MAP_ANONYMOUS;
@@ -175,7 +169,6 @@ void *AChunkMgr::low_alloc(const uint64_t size)
     ptr = nullptr;
   }
   return ptr;
-#endif
 }
 
 void AChunkMgr::low_free(const void *ptr, const uint64_t size)
@@ -357,9 +350,6 @@ bool AChunkMgr::try_inc_hold(int64_t bytes, int64_t limit, bool high_prio)
 
 int AChunkMgr::madvise(void *addr, size_t length, int advice)
 {
-#ifdef __EMSCRIPTEN__
-  return release_wasm_pages(length);
-#else
   int result = 0;
   if (length > 0) {
 #ifdef _WIN32
@@ -371,14 +361,11 @@ int AChunkMgr::madvise(void *addr, size_t length, int advice)
 #endif
   }
   return result;
-#endif
 }
 
 void AChunkMgr::munmap(void *addr, size_t length)
 {
-#ifdef __EMSCRIPTEN__
-  free_wasm_memory(addr);
-#elif defined(_WIN32)
+#ifdef _WIN32
   if (-1 == ob_munmap(addr, length)) {
     LOG_ERROR_RET(OB_ERR_UNEXPECTED, "munmap failed", KP(addr), K(length));
   }

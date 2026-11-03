@@ -4,16 +4,15 @@ title: Debug
 
 # Debug seekdb
 
-The default Bazel build retains debug information while compiling with `-O2` production optimization.
+The supported Release build uses `RelWithDebInfo`, so it retains debug information while compiling with production optimization. There is no `build.sh debug` mode.
 
 ## Build for debugging
 
 ```bash
-./build.py init
-./build.py build seekdb
+./build.sh release --init --make
 ```
 
-The binary is `build/bin/src/observer/seekdb`. Record `seekdb -V` with any core dump or debug report so the binary revision and build flags can be matched. Optimized code may inline functions or report variables as optimized out; use logs or a narrower unit test when stepping through optimized code is impractical.
+The binary is `build_release/src/observer/seekdb`. Record `seekdb -V` with any core dump or debug report so the binary revision and build flags can be matched. Optimized code may inline functions or report variables as optimized out; use logs or a narrower unit test when stepping through optimized code is impractical.
 
 ## Attach GDB or LLDB
 
@@ -21,7 +20,7 @@ Find the process and attach GDB on Linux:
 
 ```bash
 pidof seekdb
-gdb build/bin/src/observer/seekdb -p <pid>
+gdb build_release/src/observer/seekdb -p <pid>
 ```
 
 On macOS, use LLDB:
@@ -102,7 +101,7 @@ LOG_DEBUG("state before retry", K(state), K(lbt()));
 Resolve addresses with the same binary that produced the log. For example:
 
 ```bash
-addr2line -pCfe build/bin/src/observer/seekdb <address> ...
+addr2line -pCfe build_release/src/observer/seekdb <address> ...
 ```
 
 Use a binary with matching debug information; otherwise the output may contain only `??` frames.

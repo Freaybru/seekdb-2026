@@ -2,8 +2,7 @@
   "sql_nio": {
     "crate": "sql-nio",
     "headers": {},
-    "deps": [],
-    "library": "seekdb_rust"
+    "deps": []
   },
   "config": {
     "crate": "config",
@@ -12,10 +11,7 @@
       "config_checkers.h": "config_checkers.h",
       "rust/cxx.h": "cxxbridge/include/rust/cxx.h"
     },
-    "deps": [
-      "local"
-    ],
-    "library": "seekdb_rust"
+    "deps": ["local"]
   },
   "local": {
     "crate": "local",
@@ -24,22 +20,6 @@
       "local/src/bridge.rs.h": "cxxbridge/include/local/src/bridge.rs.h",
       "rust/cxx.h": "cxxbridge/include/rust/cxx.h"
     },
-    "deps": [],
-    "library": "seekdb_rust"
-  },
-  "logger": {
-    "crate": "logger",
-    "headers": {
-      "logger.h": "cxxbridge/include/logger/src/bridge.rs.h",
-      "rust/cxx.h": "cxxbridge/include/rust/cxx.h"
-    },
-    "deps": [],
-    "library": "seekdb_rust"
-  },
-  "in_process": {
-    "crate": "in-process",
-    "headers": {},
-    "deps": [],
-    "library": "seekdb_rust"
+    "deps": []
   }
 }

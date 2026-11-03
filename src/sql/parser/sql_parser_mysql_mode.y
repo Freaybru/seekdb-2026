@@ -14,12 +14,11 @@
  * limitations under the License.
  */
 
-%expect 0
-%lex-param {void *YYLEX_PARAM}
 %define api.pure
 %parse-param {ParseResult *result}
 %name-prefix "obsql_mysql_yy"
 %locations
+%verbose
 %error-verbose
 %code requires {
 #include "parse_node.h"
@@ -38,8 +37,8 @@
 }
 
 %{
-#include "sql/parser/sql_parser_mysql_mode_lex.h"
-#include "sql/parser/sql_parser_base.h"
+#include "../../../src/sql/parser/sql_parser_mysql_mode_lex.h"
+#include "../../../src/sql/parser/sql_parser_base.h"
 
 #define GEN_EXPLAN_STMT(no_use, explain_stmt, explain_type, display_type, stmt, into_table, set_statement_id) \
   (void)(no_use); \

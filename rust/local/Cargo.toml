@@ -6,7 +6,7 @@ publish = false
 links = "local"
 
 [lib]
-crate-type = ["rlib"]
+crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 kv = { path = "../kv" }
