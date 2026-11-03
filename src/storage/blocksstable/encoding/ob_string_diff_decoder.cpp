@@ -162,65 +162,9 @@ int ObStringDiffDecoder::batch_decode(
     const static uint16_t min_buf_size = 128;
     const int64_t buf_size = std::max(string_size, min_buf_size);
     char *buf = nullptr;
-    const bool fast_fix = ctx.is_fix_length() && !header_->is_hex_packing()
-        && string_size <= FAST_FIX_MAX_STR_SIZE;
     if (OB_FAIL(ret)) {
     } else if (OB_ISNULL(buf = static_cast<char *>(ctx.allocator_->alloc(buf_size * row_cap)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
-    } else if (fast_fix) {
-      // Same bytes as the generic path below: common bytes from the header
-      // template, diff bytes from the cell. The per-row descriptor walk and
-      // variable-length memcpy calls are hoisted into a precomputed segment
-      // table and a single template copy.
-      struct Seg { uint16_t f_; uint16_t p_; uint16_t n_; };
-      Seg segs[256];
-      int64_t seg_cnt = 0;
-      int64_t ppos = 0;
-      int64_t fpos = 0;
-      for (int64_t d = 0; d < header_->diff_desc_cnt_; ++d) {
-        const int64_t cnt = header_->diff_descs_[d].count_;
-        if (0 != header_->diff_descs_[d].diff_ && cnt > 0) {
-          if (seg_cnt > 0 && segs[seg_cnt - 1].f_ + segs[seg_cnt - 1].n_ == fpos
-              && segs[seg_cnt - 1].p_ + segs[seg_cnt - 1].n_ == ppos) {
-            segs[seg_cnt - 1].n_ += static_cast<uint16_t>(cnt);
-          } else {
-            segs[seg_cnt].f_ = static_cast<uint16_t>(fpos);
-            segs[seg_cnt].p_ = static_cast<uint16_t>(ppos);
-            segs[seg_cnt].n_ = static_cast<uint16_t>(cnt);
-            ++seg_cnt;
-          }
-          ppos += cnt;
-        }
-        fpos += cnt;
-      }
-      char tmpl[FAST_FIX_MAX_STR_SIZE];
-      MEMSET(tmpl, 0, sizeof(tmpl));
-      header_->copy_string(ObStringDiffHeader::LeftToRight(), std::logical_not<uint8_t>(),
-          header_->common_data(), tmpl);
-      const unsigned char *fix_base = col_data + data_offset;
-      const int64_t cell_len = header_->length_;
-      const bool has_ext = ctx.has_extend_value();
-      for (int64_t i = 0; i < row_cap; ++i) {
-        char *str_ptr = buf + i * buf_size;
-        if (16 == string_size) {
-          MEMCPY(str_ptr, tmpl, 16);
-        } else {
-          MEMCPY(str_ptr, tmpl, string_size);
-        }
-        if (has_ext && datums[i].is_null()) {
-          // Skip
-        } else {
-          const unsigned char *cell_data = fix_base + row_ids[i] * cell_len;
-          for (int64_t k = 0; k < seg_cnt; ++k) {
-            const Seg &sg = segs[k];
-            for (int64_t b = 0; b < sg.n_; ++b) {
-              str_ptr[sg.f_ + b] = static_cast<char>(cell_data[sg.p_ + b]);
-            }
-          }
-          datums[i].pack_ = string_size;
-          datums[i].ptr_ = str_ptr;
-        }
-      }
     } else {
       for (int64_t i = 0; i < row_cap; ++i) {
         header_->copy_string(ObStringDiffHeader::LeftToRight(), std::logical_not<uint8_t>(),
@@ -228,7 +172,7 @@ int ObStringDiffDecoder::batch_decode(
       }
     }
 
-    if (OB_FAIL(ret) || fast_fix) {
+    if (OB_FAIL(ret)) {
     } else if (ctx.is_fix_length()) {
       int64_t row_id = 0;
       const unsigned char *cell_data = nullptr;

@@ -582,6 +582,12 @@ int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
       }
     } else if (cur_idx_ != 0) {
       ret = OB_ERR_UNEXPECTED;
+    } else if (fast_bin_ && ob_sr_fast_bin16_cmp(id_datum, doc_id_[cur_idx_].get_datum(), result)) {
+      if (result <= 0) {
+        find = true;
+      } else {
+        ret = OB_ERR_UNEXPECTED;
+      }
     } else if (OB_FAIL(cmp_func_(
                    id_datum, doc_id_[cur_idx_].get_datum(), result, nullptr))) {
     } else if (result <= 0) {

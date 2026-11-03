@@ -52,9 +52,10 @@ struct ObSRMergeCmp
       ret = OB_NOT_INIT;
     } else {
       int tmp_ret = 0;
-      const ObDatum &ld = get_id_datum(l.iter_idx_);
-      const ObDatum &rd = get_id_datum(r.iter_idx_);
-      if (fast_bin_ && ob_sr_fast_bin16_cmp(ld, rd, tmp_ret)) {
+      // ids_ caches the FixedArray backing store so push/top avoids at() bounds checks.
+      const ObDatum &ld = *ids_[l.iter_idx_];
+      const ObDatum &rd = *ids_[r.iter_idx_];
+      if (OB_LIKELY(fast_bin_) && ob_sr_fast_bin16_cmp(ld, rd, tmp_ret)) {
         cmp_ret = tmp_ret;
       } else if (OB_FAIL(cmp_func_(ld, rd, tmp_ret, nullptr))) {
       } else {
@@ -64,17 +65,11 @@ struct ObSRMergeCmp
     return ret;
   }
 private:
-  inline const ObDatum &get_id_datum(const int64_t iter_idx)
-  {
-    const ObDatum *datum = iter_ids_->at(iter_idx);
-    OB_ASSERT(nullptr != datum);
-    return *datum;
-  }
-private:
   common::ObDatumCmpFuncType cmp_func_;
   // TODO: if memory lifetime of docid datum is guaranteed by dim_iters, we can use pointer to datum directly
   //       and avoid deep copy into merge heap here
   const ObFixedArray<const ObDatum *, ObIAllocator> *iter_ids_;
+  const ObDatum *const *ids_;  // = &(*iter_ids_)[0] after init
   bool fast_bin_;
   bool is_inited_;
 };
