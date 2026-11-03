@@ -19,7 +19,6 @@
 
 #include "ob_i_sparse_retrieval_iter.h"
 #include "ob_sparse_utils.h"
-#include "ob_sparse_retrieval_util.h"
 #include "storage/access/ob_scan_merge_loser_tree.h"
 #include "storage/access/ob_simple_rows_merger.h"
 
@@ -45,32 +44,19 @@ struct ObSRMergeCmp
   virtual ~ObSRMergeCmp() {}
 
   int init(sql::ObDatumMeta id_meta, const ObFixedArray<const ObDatum *, ObIAllocator> *iter_ids);
-  OB_INLINE int cmp(const ObSRMergeItem &l, const ObSRMergeItem &r, int64_t &cmp_ret)
+  int cmp(const ObSRMergeItem &l, const ObSRMergeItem &r, int64_t &cmp_ret);
+private:
+  inline const ObDatum &get_id_datum(const int64_t iter_idx)
   {
-    int ret = OB_SUCCESS;
-    if (OB_UNLIKELY(!is_inited_)) {
-      ret = OB_NOT_INIT;
-    } else {
-      int tmp_ret = 0;
-      // ids_ caches the FixedArray backing store so push/top avoids at() bounds checks.
-      const ObDatum &ld = *ids_[l.iter_idx_];
-      const ObDatum &rd = *ids_[r.iter_idx_];
-      if (OB_LIKELY(fast_bin_) && ob_sr_fast_bin16_cmp(ld, rd, tmp_ret)) {
-        cmp_ret = tmp_ret;
-      } else if (OB_FAIL(cmp_func_(ld, rd, tmp_ret, nullptr))) {
-      } else {
-        cmp_ret = tmp_ret;
-      }
-    }
-    return ret;
+    const ObDatum *datum = iter_ids_->at(iter_idx);
+    OB_ASSERT(nullptr != datum);
+    return *datum;
   }
 private:
   common::ObDatumCmpFuncType cmp_func_;
   // TODO: if memory lifetime of docid datum is guaranteed by dim_iters, we can use pointer to datum directly
   //       and avoid deep copy into merge heap here
   const ObFixedArray<const ObDatum *, ObIAllocator> *iter_ids_;
-  const ObDatum *const *ids_;  // = &(*iter_ids_)[0] after init
-  bool fast_bin_;
   bool is_inited_;
 };
 
