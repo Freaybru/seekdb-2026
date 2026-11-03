@@ -238,6 +238,8 @@ enum ObGranuleSplitterType
 class ObGranuleUtil
 {
 public:
+  // min granule size (KB) of the data table scan of the fulltext index / doc word DDL
+  static constexpr int64_t FTS_DDL_MIN_TASK_ACCESS_SIZE_KB = 16;
   static constexpr int64_t PARTITION_SCAN_TABLETS_PER_WORKER = 64;
   static constexpr int64_t HASH_PARTITION_SCAN_TABLETS_PER_WORKER = 13;
 

@@ -155,6 +155,8 @@ public:
         const uint64_t col_id,
         ObTableSchema &data_schema, // not const since will add column to data schema
         schema::ObColumnSchemaV2 *&doc_id_col);
+  // max default parallelism of building one fulltext index aux table when no parallelism is specified
+  static constexpr int64_t FTS_DEFAULT_MAX_AUTO_DDL_PARALLELISM = 8;
   static int decide_parallelism(
         const share::schema::ObIndexType index_type,
         const int64_t original_parallelism,

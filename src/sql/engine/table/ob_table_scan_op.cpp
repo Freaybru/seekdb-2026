@@ -2967,7 +2967,10 @@ int ObTableScanOp::inner_get_next_row()
       if (ret != OB_ITER_END) {
       }
     }
-  } else if (OB_UNLIKELY(MY_SPEC.is_fts_ddl_ && nullptr == tsc_rtdef_.scan_rtdef_.sample_info_)) {
+  } else if (OB_UNLIKELY(MY_SPEC.is_fts_ddl_)) {
+    // Also expand fulltext rows in sample scan mode: the dynamic range sampling of the
+    // fts/doc_word DDL must see real (word, doc_id) sort keys, otherwise the range cuts
+    // are built on raw document text with NULL doc_id and the slices are heavily skewed.
     if (OB_FAIL(inner_get_next_fts_index_row())) {
       if (OB_ITER_END != ret) {
       }

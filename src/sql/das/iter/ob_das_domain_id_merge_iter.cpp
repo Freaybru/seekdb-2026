@@ -329,6 +329,7 @@ int ObDASDomainIdMergeIter::check_is_need_multi_get()
 int ObDASDomainIdMergeIter::build_rowkey_domain_range()
 {
   int ret = OB_SUCCESS;
+  bool data_table_sampled = false;
   if (OB_ISNULL(data_table_iter_) || OB_ISNULL(data_table_ctdef_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(check_is_need_multi_get())) {
@@ -400,13 +401,18 @@ int ObDASDomainIdMergeIter::build_rowkey_domain_range()
         }
         if (OB_SUCC(ret)) {
           scan_param.tablet_id_ = rowkey_domain_tablet_ids_.at(k);
-          scan_param.sample_info_ = data_table_iter_->get_scan_param().sample_info_;
+          // The rowkey->domain id table is never sampled. When the data table is sampled, the
+          // sampled data rows are a rowkey-ordered subset, and their real domain ids are found
+          // by the sorted merge join below instead of being left empty.
+          scan_param.sample_info_.reset();
+          data_table_sampled = data_table_sampled
+              || data_table_iter_->get_scan_param().sample_info_.method_ != common::SampleInfo::NO_SAMPLE;
           scan_param.scan_flag_.scan_order_ = data_table_iter_->get_scan_param().scan_flag_.scan_order_;
           scan_param.enable_new_false_range_ = data_table_iter_->get_scan_param().enable_new_false_range_;
           if (!data_table_iter_->get_scan_param().need_switch_param_) {
             scan_param.need_switch_param_ = false;
           }
-          is_no_sample_ = (scan_param.sample_info_.method_ == common::SampleInfo::NO_SAMPLE);
+          is_no_sample_ = true;
           LOG_INFO("build rowkey domain range", K(ret), K(scan_param.key_ranges_), K(scan_param.sample_info_));
         }
       }
@@ -414,7 +420,7 @@ int ObDASDomainIdMergeIter::build_rowkey_domain_range()
   }
   if (OB_SUCC(ret)) {
     const ObExprPtrIArray *op_filters = data_table_iter_->get_scan_param().op_filters_;
-    if (OB_ISNULL(op_filters) || (OB_NOT_NULL(op_filters) && op_filters->empty())) {
+    if (!data_table_sampled && (OB_ISNULL(op_filters) || (OB_NOT_NULL(op_filters) && op_filters->empty()))) {
       need_filter_rowkey_domain_ = false;
     } else {
       need_filter_rowkey_domain_ = true;
@@ -485,10 +491,7 @@ int ObDASDomainIdMergeIter::init_rowkey_domain_scan_param(
     scan_param.pd_storage_filters_ = rtdef->p_pd_expr_op_->pd_storage_filters_;
     if (OB_FAIL(scan_param.column_ids_.assign(ctdef->access_column_ids_))) {
     }
-    if (rtdef->sample_info_ != nullptr) {
-      scan_param.sample_info_ = *rtdef->sample_info_;
-      is_no_sample_ = (scan_param.sample_info_.method_ == common::SampleInfo::NO_SAMPLE);
-    }
+    // never sample the rowkey->domain id table, see build_rowkey_domain_range
   }
 
   LOG_INFO("init rowkey domain table scan param finished", K(scan_param), K(ret));

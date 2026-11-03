@@ -217,7 +217,14 @@ int ObGranuleUtil::split_block_granule(ObExecContext &exec_ctx,
   // 3. calc the total number of tasks for all partitions
   int64_t esti_task_cnt_by_data_size = 0;
   if (OB_SUCC(ret)) {
-    data_plane::ObParallelRangeTaskParams params(config::px_task_size() >> 10);
+    int64_t min_task_access_size_kb = config::px_task_size() >> 10;
+    if (nullptr != tsc && tsc->is_fts_ddl_) {
+      // Building fulltext index rows (tokenization) is CPU bound and expands every row into many
+      // index rows, so the raw data size heavily underestimates the work of a granule. Use small
+      // granules so that all PX workers of the fts/doc_word DDL get a balanced share of the docs.
+      min_task_access_size_kb = MIN(min_task_access_size_kb, FTS_DDL_MIN_TASK_ACCESS_SIZE_KB);
+    }
+    data_plane::ObParallelRangeTaskParams params(MAX(min_task_access_size_kb, 1L));
     params.parallelism_ = parallelism;
     params.expected_task_load_kb_ = tablet_size/1024;
     if (OB_FAIL(data_plane::ObParallelRangeTaskPlanner::compute_total_task_count(
