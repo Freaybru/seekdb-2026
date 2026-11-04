@@ -1,10 +1,20 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "measured_date": "2026-11-04",
   "baseline_commit": "634888d9b037153fa143d2c913ba4b25503e1d62",
-  "scope": "local development measurements; not official contest results",
-  "hidden_dataset_tested": false,
-  "official_score": null,
+  "reference_commit": "4784cc2eb586813f08c07cd990e6965f2bfa6162",
+  "scope": "Final-candidate local validation; paired SQL reference is the previous submission, not frozen V5",
+  "hidden_dataset_tested_locally": false,
+  "official_predecessor": {
+    "commit": "4784cc2eb586813f08c07cd990e6965f2bfa6162",
+    "submission_time": "2026-11-04 13:11 Asia/Shanghai",
+    "score": 18.166,
+    "build_speedup": 2.598,
+    "query_speedup": 4.582,
+    "gates": "pass",
+    "source": "official test-record result panel"
+  },
+  "official_final_candidate": "not yet submitted at report generation",
   "environment": {
     "gpu_arch": "gfx1100",
     "vram_capacity_bytes": 51522830336,
@@ -21,8 +31,8 @@
   },
   "candidate_parameters": {
     "build_algorithm": "NN_DESCENT",
-    "nn_descent_niter": 10,
-    "intermediate_graph_degree": 192,
+    "nn_descent_niter": 5,
+    "intermediate_graph_degree": 128,
     "graph_degree": 64,
     "search_algorithm": "MULTI_CTA",
     "itopk_size": "max(4096, 4*k)",
@@ -30,7 +40,7 @@
     "input_dtype": "float32",
     "retained_query_workspace_limit_bytes": 8388608
   },
-  "paired_sql": {
+  "paired_sql_vs_previous_submission": {
     "public_sift250k_128": {
       "input": {
         "source": "public SIFT1M, first selected base and query rows",
@@ -47,57 +57,27 @@
           "truth.npy": "a6b4ffe9d1a4f21903766e852b1dc328b5fb087f8c6254f30271b9ae84fad7fc"
         }
       },
-      "baseline": {
+      "reference": {
         "backend": "cuvs",
         "rows": 250000,
         "dim": 128,
         "nq": 4096,
         "cpu_slots": 24,
         "status": "pass",
-        "vram_peak_bytes": 734183424,
-        "server_rss_peak_bytes": 2747461632,
-        "ddl_s": 21.82810371927917,
-        "build_through_first_s": 21.861797271296382,
+        "vram_peak_bytes": 665837568,
+        "server_rss_peak_bytes": 2391310336,
+        "ddl_s": 7.116689009591937,
+        "build_through_first_s": 7.132336974143982,
         "10": {
-          "qps": 142.07434685590698,
-          "p95_ms": 7.479801308363676,
+          "qps": 1593.2305002230507,
+          "p95_ms": 0.639558769762516,
           "recall": 0.9999267578125,
           "result_integrity": true
         },
         "100": {
-          "qps": 134.60469327583016,
-          "p95_ms": 7.8607783652842045,
-          "recall": 0.9999755859375,
-          "result_integrity": true
-        },
-        "restart_same_ids": true,
-        "gpu_snapshots_serialized": 1,
-        "gpu_snapshots_reloaded": 1,
-        "cpu_fallbacks": 0,
-        "binary_sha256": "266bdd427e83037111b3d5ea703092201016efd762ee59336d1ed08dde91c0a7",
-        "bridge_sha256": "030b36246e3fc4e92743e432d00979f7a729fdf36fb8b6ff482b75fb008e9da6"
-      },
-      "candidate": {
-        "backend": "cuvs",
-        "rows": 250000,
-        "dim": 128,
-        "nq": 4096,
-        "cpu_slots": 24,
-        "status": "pass",
-        "vram_peak_bytes": 762912768,
-        "server_rss_peak_bytes": 2355949568,
-        "ddl_s": 7.084543980658054,
-        "build_through_first_s": 7.099686512723565,
-        "10": {
-          "qps": 1638.7562224529129,
-          "p95_ms": 0.6336295045912266,
-          "recall": 0.999951171875,
-          "result_integrity": true
-        },
-        "100": {
-          "qps": 917.6759766198197,
-          "p95_ms": 1.1425167322158813,
-          "recall": 0.999970703125,
+          "qps": 929.7046602426657,
+          "p95_ms": 1.1301119811832905,
+          "recall": 0.9999609375,
           "result_integrity": true
         },
         "concurrent_clients": 4,
@@ -106,22 +86,52 @@
         "gpu_snapshots_serialized": 1,
         "gpu_snapshots_reloaded": 1,
         "cpu_fallbacks": 0,
-        "binary_sha256": "f48c88c383bdb081be75c5ecc9d5d0f70f6e8898ad7ed07290950034dafb5236",
+        "binary_sha256": "256d5692df67bbe98bda9381c16552c58959ab2d85f1fcabaf8f35f898401880",
         "bridge_sha256": "2c33b8fbbcd06acecf94889566bad714abd041d1c90d40fa37f2c10c09b1d6ac"
       },
-      "order": "baseline,candidate",
-      "build_speedup": 3.079262335332298,
-      "query_speedup_geomean": 8.86775983735568,
-      "sampled_vram_ratio": 1.0391310169378054,
+      "candidate": {
+        "backend": "cuvs",
+        "rows": 250000,
+        "dim": 128,
+        "nq": 4096,
+        "cpu_slots": 24,
+        "status": "pass",
+        "vram_peak_bytes": 665620480,
+        "server_rss_peak_bytes": 2160902144,
+        "ddl_s": 5.370996443554759,
+        "build_through_first_s": 5.38746240362525,
+        "10": {
+          "qps": 1598.5791144201041,
+          "p95_ms": 0.6529972888529301,
+          "recall": 0.9999267578125,
+          "result_integrity": true
+        },
+        "100": {
+          "qps": 922.8770721904834,
+          "p95_ms": 1.1407602578401566,
+          "recall": 0.99996337890625,
+          "result_integrity": true
+        },
+        "concurrent_clients": 4,
+        "concurrent_queries": 128,
+        "restart_same_ids": true,
+        "gpu_snapshots_serialized": 1,
+        "gpu_snapshots_reloaded": 1,
+        "cpu_fallbacks": 0,
+        "binary_sha256": "256d5692df67bbe98bda9381c16552c58959ab2d85f1fcabaf8f35f898401880",
+        "bridge_sha256": "be1089c2bb002bb04917513f328ee9d4afcb5ddc3e1f48d0d0481cbb06dd8a0b"
+      },
+      "order": "reference,candidate",
+      "build_speedup_vs_previous": 1.3238768904159028,
+      "query_speedup_vs_previous": 0.9979922890148157,
       "local_checks": {
-        "all_ids_valid_and_unique": true,
-        "relative_recall": true,
-        "recall_floor": true,
-        "query_no_regression": true,
-        "relative_sampled_vram": true,
-        "physical_sampled_vram": true,
-        "host_memory": true,
-        "snapshot_reload": true,
+        "complete_unique_ids": true,
+        "recall_drop_vs_previous_at_most_0_005": true,
+        "query_geomean_at_least_0_9_previous": true,
+        "sampled_vram_at_most_1_25_previous": true,
+        "sampled_vram_at_most_45_gib": true,
+        "host_memory_at_most_96_gib": true,
+        "gpu_snapshot_and_reload": true,
         "no_observed_cpu_fallback": true
       }
     },
@@ -141,35 +151,37 @@
           "truth.npy": "a66b4b2c1d4e6c60d542bef736d64a4c4b0debf9fe9b1070e453a09faac2075e"
         }
       },
-      "baseline": {
+      "reference": {
         "backend": "cuvs",
         "rows": 250000,
         "dim": 256,
         "nq": 4096,
         "cpu_slots": 24,
         "status": "pass",
-        "vram_peak_bytes": 1184829440,
-        "server_rss_peak_bytes": 3321700352,
-        "ddl_s": 23.069847662001848,
-        "build_through_first_s": 23.104902494698763,
+        "vram_peak_bytes": 794517504,
+        "server_rss_peak_bytes": 3200557056,
+        "ddl_s": 9.226467741653323,
+        "build_through_first_s": 9.242351673543453,
         "10": {
-          "qps": 126.07734813021773,
-          "p95_ms": 8.219143375754356,
-          "recall": 0.952783203125,
+          "qps": 1399.2336567720097,
+          "p95_ms": 0.7275226525962353,
+          "recall": 0.9885986328125,
           "result_integrity": true
         },
         "100": {
-          "qps": 121.61758629527229,
-          "p95_ms": 8.60860338434577,
-          "recall": 0.899814453125,
+          "qps": 872.2301188850882,
+          "p95_ms": 1.2072683311998844,
+          "recall": 0.9765185546875,
           "result_integrity": true
         },
+        "concurrent_clients": 4,
+        "concurrent_queries": 128,
         "restart_same_ids": true,
         "gpu_snapshots_serialized": 1,
         "gpu_snapshots_reloaded": 1,
         "cpu_fallbacks": 0,
-        "binary_sha256": "266bdd427e83037111b3d5ea703092201016efd762ee59336d1ed08dde91c0a7",
-        "bridge_sha256": "030b36246e3fc4e92743e432d00979f7a729fdf36fb8b6ff482b75fb008e9da6"
+        "binary_sha256": "256d5692df67bbe98bda9381c16552c58959ab2d85f1fcabaf8f35f898401880",
+        "bridge_sha256": "2c33b8fbbcd06acecf94889566bad714abd041d1c90d40fa37f2c10c09b1d6ac"
       },
       "candidate": {
         "backend": "cuvs",
@@ -178,45 +190,77 @@
         "nq": 4096,
         "cpu_slots": 24,
         "status": "pass",
-        "vram_peak_bytes": 794476544,
-        "server_rss_peak_bytes": 3126116352,
-        "ddl_s": 8.998497510328889,
-        "build_through_first_s": 9.014137007296085,
+        "vram_peak_bytes": 794296320,
+        "server_rss_peak_bytes": 3079102464,
+        "ddl_s": 7.0544447638094425,
+        "build_through_first_s": 7.071713477373123,
         "10": {
-          "qps": 1394.3730053904837,
-          "p95_ms": 0.7581254467368126,
-          "recall": 0.988720703125,
+          "qps": 1382.6439119611887,
+          "p95_ms": 0.7494804449379444,
+          "recall": 0.9859619140625,
           "result_integrity": true
         },
         "100": {
-          "qps": 859.2620363180174,
-          "p95_ms": 1.2204218655824661,
-          "recall": 0.9762255859375,
+          "qps": 858.5772404059918,
+          "p95_ms": 1.2179911136627197,
+          "recall": 0.97166015625,
           "result_integrity": true
         },
+        "concurrent_clients": 4,
+        "concurrent_queries": 128,
         "restart_same_ids": true,
         "gpu_snapshots_serialized": 1,
         "gpu_snapshots_reloaded": 1,
         "cpu_fallbacks": 0,
-        "binary_sha256": "f48c88c383bdb081be75c5ecc9d5d0f70f6e8898ad7ed07290950034dafb5236",
-        "bridge_sha256": "2c33b8fbbcd06acecf94889566bad714abd041d1c90d40fa37f2c10c09b1d6ac"
+        "binary_sha256": "256d5692df67bbe98bda9381c16552c58959ab2d85f1fcabaf8f35f898401880",
+        "bridge_sha256": "be1089c2bb002bb04917513f328ee9d4afcb5ddc3e1f48d0d0481cbb06dd8a0b"
       },
-      "order": "candidate,baseline",
-      "build_speedup": 2.5631851918822117,
-      "query_speedup_geomean": 8.839660237212795,
-      "sampled_vram_ratio": 0.6705408535425994,
+      "order": "candidate,reference",
+      "build_speedup_vs_previous": 1.3069465700378802,
+      "query_speedup_vs_previous": 0.9862435993110108,
       "local_checks": {
-        "all_ids_valid_and_unique": true,
-        "relative_recall": true,
-        "recall_floor": true,
-        "query_no_regression": true,
-        "relative_sampled_vram": true,
-        "physical_sampled_vram": true,
-        "host_memory": true,
-        "snapshot_reload": true,
+        "complete_unique_ids": true,
+        "recall_drop_vs_previous_at_most_0_005": true,
+        "query_geomean_at_least_0_9_previous": true,
+        "sampled_vram_at_most_1_25_previous": true,
+        "sampled_vram_at_most_45_gib": true,
+        "host_memory_at_most_96_gib": true,
+        "gpu_snapshot_and_reload": true,
         "no_observed_cpu_fallback": true
       }
     }
+  },
+  "final_source_build_smoke": {
+    "backend": "cuvs",
+    "rows": 250000,
+    "dim": 128,
+    "nq": 64,
+    "cpu_slots": 24,
+    "status": "pass",
+    "vram_peak_bytes": 665616384,
+    "server_rss_peak_bytes": 2160857088,
+    "ddl_s": 5.353207675740123,
+    "build_through_first_s": 5.368492694571614,
+    "10": {
+      "qps": 1300.5095632086525,
+      "p95_ms": 1.0677961632609367,
+      "recall": 1.0,
+      "result_integrity": true
+    },
+    "100": {
+      "qps": 814.4229806695375,
+      "p95_ms": 1.326049771159887,
+      "recall": 1.0,
+      "result_integrity": true
+    },
+    "concurrent_clients": 4,
+    "concurrent_queries": 128,
+    "restart_same_ids": true,
+    "gpu_snapshots_serialized": 1,
+    "gpu_snapshots_reloaded": 1,
+    "cpu_fallbacks": 0,
+    "binary_sha256": "89bc769b0b81ca3c76789182e72337a845d480c090b7c4ca0319f38e1e2425c5",
+    "bridge_sha256": "be1089c2bb002bb04917513f328ee9d4afcb5ddc3e1f48d0d0481cbb06dd8a0b"
   },
   "cpu_vs_gpu_sift": {
     "cpu": {
@@ -227,73 +271,88 @@
       "cpu_slots": 24,
       "status": "pass",
       "vram_peak_bytes": 0,
-      "server_rss_peak_bytes": 1399029760,
-      "ddl_s": 80.68165380135179,
-      "build_through_first_s": 80.83253768645227,
+      "server_rss_peak_bytes": 1438777344,
+      "ddl_s": 80.66581473313272,
+      "build_through_first_s": 80.8192559313029,
       "10": {
-        "qps": 2699.5394695160276,
-        "p95_ms": 0.6693406030535695,
+        "qps": 2661.6696486476353,
+        "p95_ms": 0.7099495269358158,
         "recall": 0.9890625,
         "result_integrity": true
       },
       "100": {
-        "qps": 1303.3230806999065,
-        "p95_ms": 0.9453843347728252,
+        "qps": 1418.763637504782,
+        "p95_ms": 0.7445150054991244,
         "recall": 0.95828125,
         "result_integrity": true
       },
       "restart_same_ids": true,
-      "binary_sha256": "f48c88c383bdb081be75c5ecc9d5d0f70f6e8898ad7ed07290950034dafb5236",
-      "bridge_sha256": "2c33b8fbbcd06acecf94889566bad714abd041d1c90d40fa37f2c10c09b1d6ac"
+      "binary_sha256": "89bc769b0b81ca3c76789182e72337a845d480c090b7c4ca0319f38e1e2425c5",
+      "bridge_sha256": "be1089c2bb002bb04917513f328ee9d4afcb5ddc3e1f48d0d0481cbb06dd8a0b"
     },
-    "cpu_over_candidate_build_speedup": 11.385367162562714,
-    "query_note": "CPU queries are 64 diagnostics; not used for GPU scoring comparisons"
+    "cpu_over_gpu_build_speedup": 15.001358687332877,
+    "note": "CPU and final-relink smoke use 64 diagnostic SQLs; only build-through-first time is compared with the 4096-query GPU run"
   },
   "additional_validation": {
     "workspace_and_lifecycle_regression": "pass; cached/uncached batches, 4-thread calls, distances, invalid args, snapshots, 256/512/1024 rows",
-    "sql_concurrent_clients": 4,
-    "sql_concurrent_queries": 128,
-    "cpu_ground_truth_crosscheck": {
-      "status": "pass",
-      "rows": 512,
-      "dim": 16,
-      "nq": 8,
-      "reference": "direct float64 squared differences"
-    },
-    "gaussian250k_128_bridge_recall": {
-      "scope": "C ABI batch of 4096 queries; not SQL timing",
-      "seed": 20261104,
-      "baseline": {
-        "10": 0.9910888671875,
-        "100": 0.9664282226562501
+    "native_single_query_quality_vs_frozen_v5": {
+      "sift250k": {
+        "rows": 250000,
+        "dim": 128,
+        "nq": 4096,
+        "reference_recall": {
+          "10": 0.9999755859375,
+          "100": 0.9999755859375
+        },
+        "candidate_recall": {
+          "10": 0.9999267578125,
+          "100": 0.9999633789062501
+        }
       },
-      "candidate": {
-        "10": 0.9982666015625,
-        "100": 0.9950903320312501
+      "gaussian256": {
+        "rows": 250000,
+        "dim": 256,
+        "nq": 4096,
+        "reference_recall": {
+          "10": 0.9512451171875002,
+          "100": 0.89909912109375
+        },
+        "candidate_recall": {
+          "10": 0.9857421875,
+          "100": 0.9717089843750001
+        }
+      },
+      "gaussian128": {
+        "rows": 250000,
+        "dim": 128,
+        "nq": 4096,
+        "reference_recall": {
+          "10": 0.9904785156250001,
+          "100": 0.96626953125
+        },
+        "candidate_recall": {
+          "10": 0.99697265625,
+          "100": 0.9921801757812501
+        }
       }
     },
+    "native_measurement_note": "4096 separate bridge calls per Top-10/100; compilation ran on disjoint CPU cores, so native build timings are excluded",
     "local_gpu_profiler": {
-      "scope": "standalone production-bridge regression, not organizer audit",
-      "kernel_dispatches": 1610,
-      "nn_descent_dispatches": 112,
+      "scope": "standalone production-bridge regression; not organizer audit",
+      "kernel_dispatches": 1524,
+      "nn_descent_dispatches": 64,
       "multi_cta_search_dispatches": 334,
-      "cagra_dispatches": 770,
-      "memory_copy_dispatches": 212
+      "memory_copy_dispatches": 140
     }
   },
   "production_source_sha256": {
     "src/oblib/lib/vector/ob_vsag_adaptor.cpp": "44d1a1c48f7d5be8192b5c96bb2d31f29bb09be30b216ce0bdebfd0fc9f8ecc2",
     "tools/hipvs_bridge/build.sh": "7c84a2bb5e949fcedfe4d8102d95a9ab923125169e204291ad800dd90c0418f8",
-    "tools/hipvs_bridge/seekdb_cuvs_bridge.c": "b87c286a2a3acfab6d830e5415d3aa2234a6cefd599650c84a47d00f0e8df4b5",
+    "tools/hipvs_bridge/seekdb_cuvs_bridge.c": "b20f83f9e6fd02928e311b00d8eb525c5b21a595416a5dcd64f3e7658d1ca2be",
     "tools/hipvs_bridge/seekdb_cuvs_bridge.h": "d9e00b5aee420e7e47f3e756c61d7e674529c40960e4231914dfa25486743385"
   },
   "platform_library_sha256": {
     "libcuvs.so": "5ccf012af5923c687cd2d22149740a410ca69e0aa51223a6386ba6fc129c967a",
     "libcuvs_c.so": "b63211897276e0a6911bb534fe77c8b0b59f31c50af1df2f108845f06ad46ebf"
-  },
-  "not_run": [
-    "Hidden250K",
-    "organizer external GPU-path audit",
-    "competition platform evaluation"
-  ]
+  }
 }

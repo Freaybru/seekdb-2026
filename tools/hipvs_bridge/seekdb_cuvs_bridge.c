@@ -67,10 +67,10 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_sp;
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 64;
-  h->ip->intermediate_graph_degree = 192;
+  h->ip->intermediate_graph_degree = 128;
   /* Reduce NN-descent/pruning work and snapshot size, then use a wider native
    * GPU search to retain end-to-end recall. Input vectors remain FP32. */
-  h->ip->nn_descent_niter = 10;
+  h->ip->nn_descent_niter = 5;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   if (cuvsStreamSync(h->res) != CUVS_SUCCESS) goto fail_idx;
