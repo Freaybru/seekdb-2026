@@ -18,6 +18,10 @@ int seekdb_cuvs_cagra_knn(const float* base, long n, long dim,
  *    cols), writing uint32 row offsets to out_ids[nq*topk] and (if non-NULL) L2
  *    distances to out_dist[nq*topk]. Returns 0 on success.
  *  - seekdb_cuvs_free: releases the handle.
+ * Search and serialization calls on the same handle are serialized internally.
+ * Calls complete all GPU work before returning. The caller must keep the handle
+ * alive until all calls finish before freeing it. Query workspaces are bounded
+ * and released with the index; they do not cache graph or query results.
  * All ROCm/cuVS state lives inside the .so; seekdb only ever sees these C symbols. */
 void* seekdb_cuvs_build(const float* base, long n, long dim);
 int   seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
