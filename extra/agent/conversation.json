@@ -1,0 +1,150 @@
+{
+  "title": "MiniVectorDB 开发与验证记录",
+  "synthetic": false,
+  "scope": "选取与本次加赛实现、验证及交付相关的真实交互和结果。省略本机目录、环境标识、账号凭据和无关工具输出。编号是本文件内的顺序标识。",
+  "context": {
+    "assignment": "实现单机单客户端的轻量向量数据库。功能准入覆盖 SQL、过滤 TopK、向量索引、持久化、事务和进程崩溃恢复。性能项还约束召回率与资源。",
+    "constraints": "参赛者要求改动仅放在 extra，允许向指定 GitHub 仓库提交，并要求保护本地信息。评测题面要求源码、Dockerfile 与学习材料来自同一次提交。",
+    "attribution": "参赛者的原始任务要求保留在 U01。实现选择、实验设计、实验执行及解释均由 Agent 完成；工具输出单独标记。选手自己的技术分析、独立验证或结果解释尚未纳入这份材料。"
+  },
+  "conversations": [
+    {
+      "id": "U01",
+      "role": "user",
+      "content": "（要求这个对话内所有操作只能在“extra”文件夹中进行）你的任务是按照要求完成这个题目https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6#haC5C。\n你可以连接我GitHub上面的“seekdb-2026”仓库，进行需要的操作。\n提交或其他操作时对其他分支/本分支内其他文件夹/仓库基本信息的任何内容不可修改（若有需求可以新建分支）。\n你可以去进行其他的操作，保证按照题目要求完成，远程仓库内容可以直接提交。\n不要在远程仓库暴露本地的信息（包括文件地址等），不要有冗余的文件。"
+    },
+    {
+      "id": "A01",
+      "role": "assistant",
+      "content": "已读到完整题面。评分先卡 SQL、事务、崩溃恢复和资源用例，全部通过才进入性能和学习材料排名。我在核对配套题包是否已发布，以及评测入口能否指向 `extra`。"
+    },
+    {
+      "id": "A02",
+      "role": "assistant",
+      "content": "官方加赛分支已经存在，目前只放了空的构建和对话材料占位文件，题面也还没给出完整的 stdin/stdout 协议。我会先在 `extra` 内实现可独立测试的数据库核心，把协议适配留在单独的入口，便于拿到题包后对齐。"
+    },
+    {
+      "id": "A03",
+      "role": "assistant",
+      "content": "SQL 解析和追加式日志已写好。接下来我会接上执行器，再验证两个容易出错的边界：多行语句失败后是否只撤销本条语句，以及强杀进程后是否能保留已确认的提交。"
+    },
+    {
+      "id": "A04",
+      "role": "assistant",
+      "content": "执行器已接上，包含主键范围查询、过滤后的 TopK，以及事务内读取自己的修改。我会用 Linux 进程实测崩溃恢复，并把数据集做得大于进程内存上限，检查是否确实能从磁盘读取。"
+    },
+    {
+      "id": "A05",
+      "role": "assistant",
+      "content": "这题的 §3.4 只给选手本人的学习证据计分。你有没有想验证的一个边界情况和自己的预期结果？例如可选多行写入中途报错、事务中更新向量后回滚，或强杀进程后重启。我会运行你提出的用例，将你的原话和实测结果分开记录。"
+    },
+    {
+      "id": "A06",
+      "role": "assistant",
+      "content": "附加验证也通过了：一次在提交标记只写入一部分时强杀，另一次在恢复截断后、发出 `READY` 前强杀，两次都只恢复了已提交的数据。索引对照还发现，放宽剪枝阈值会漏掉同距时主键更小的行，已改用严格下界并复测。"
+    }
+  ],
+  "experiments": [
+    {
+      "id": "E01",
+      "actor": "agent",
+      "topic": "SQL 值域、过滤和事务可见性",
+      "method": "用长度为三的 VARCHAR 保存“猫🦊é”，同时用四字符字符串触发长度错误。写入两个有过滤资格且距离均为 5 的向量，另放一条不满足过滤的零距离向量。分别检查投影、主键顺序和 TopK。向量输入覆盖维度错、非有限数、float32 溢出、下溢和最大有限值。事务中更新 id=4 的向量并删除 id=2，先检查事务内 TopK，再检查回滚和正常退出后重启。",
+      "observed": "过滤 TopK 为 [(2,5),(4,5)]。事务内为 [(4,1)]，回滚后恢复 [(2,5),(4,5)]。用 QUIT 退出含未提交写入的事务，重启后查不到该写入。1e-80 转为 0，3.4028235e38 转为有限 float32。",
+      "output": "SQL, Unicode, float32, filtered TopK, transaction visibility and normal restart: passed",
+      "result_source": "Linux 本地 verify.py 标准输出",
+      "interpretation": "资格筛选必须先于堆截断，否则零距离的非目标行会挤占 K。先把数字转成 float32 后再计算距离，才能让存储、查询和重启结果一致。"
+    },
+    {
+      "id": "E02",
+      "actor": "agent",
+      "topic": "跨写缓冲区的语句原子性与进程强杀",
+      "method": "先提交 id=1，再在显式事务写入 id=2。构造 348 行 INSERT，最后一行与 id=1 冲突，前面的 347 行各带 1,024 字符，足以越过 256 KiB 写缓冲。检查错误后的可见集合并提交。随后开启另一事务，更新第一行、删除第二行、建表并插入数百行，收到语句成功后在发出 COMMIT 前发送 SIGKILL。重启后再做一次自动提交，收到成功响应后立即 SIGKILL。",
+      "observed": "失败语句返回 DUPLICATE_KEY，查询只剩已提交的 id=1 与事务内先前成功的 id=2。第一次强杀后重启仍保留两条原记录，新建表不存在。第二次强杀后重启仍保留已确认写入的 acknowledged 值。",
+      "output": "Failed 348-row INSERT across a log flush and two SIGKILL/restart sequences: passed",
+      "result_source": "Linux 本地 verify.py 标准输出",
+      "interpretation": "逆序恢复行目录并把日志截断到语句起点，才能撤掉已经写出文件的部分，同时保留同一事务内此前成功的写入。显式事务内的语句成功表示事务内可见，COMMIT 或自动提交成功才跨越持久化边界。"
+    },
+    {
+      "id": "E03",
+      "actor": "agent",
+      "topic": "日志尾部边界与重复恢复",
+      "method": "从同一份持久日志制作六份前缀，切点覆盖不完整帧头、缺失负载、完整变更但没有提交帧、残缺提交帧和完整提交帧。每份启动两次。",
+      "observed": "所有不含完整提交帧的前缀只返回 [(1,7)]。完整提交前缀返回 [(1,8),(2,3)]。两次启动结果一致。",
+      "output": "Six log cut points, with two successive recoveries each: passed",
+      "result_source": "Linux 本地 verify.py 标准输出",
+      "interpretation": "将完整提交帧作为重放边界，可以把已完整写出的行帧与事务提交区分开。重复启动只需保留相同的已提交前缀。"
+    },
+    {
+      "id": "E04",
+      "actor": "agent",
+      "topic": "真实提交与恢复路径的故障注入",
+      "method": "用本地动态链接测试构建拦截文件系统调用。自动提交 UPDATE 的实际 pwrite 留下最后 12 字节未写即触发 SIGKILL。另一次在撤销未提交尾部的恢复中，ftruncate 成功后立即 SIGKILL，检查标准输出尚无 READY。随后用静态构建重启两次。",
+      "output": "Injected SIGKILL during a partial commit and again after recovery truncate before READY; both subsequent starts returned only committed row (1,10)",
+      "result_source": "Linux 本地故障注入测试标准输出",
+      "interpretation": "前缀截断是恢复中的持久化状态变化。在该系统调用已完成、内存索引尚未重新就绪时再次崩溃，下次启动仍可从同一提交边界重建。"
+    },
+    {
+      "id": "E05",
+      "actor": "agent",
+      "topic": "索引剪枝与同距顺序的 A/B 对照",
+      "method": "构造一维查询 q=[0]，让 id=1 的坐标为 -1、id=2 的坐标为 1，K=1。扫描从右侧先访问 id=2。原型使用第 K 名平方距离除以 1.0000200001 作为剪枝阈值，修订版比较严格下界与第 K 名平方距离。两版由同一源码构建，只改变阈值。",
+      "output": "ANN bound A/B: relative cutoff returned id=2 for an equal-distance tie; strict lower bound returned id=1",
+      "result_source": "Linux 本地两版二进制 A/B 标准输出",
+      "interpretation": "第一个坐标差的平方是整个距离的下界。即使相对放宽幅度很小，也可能使同距行跳过主键比较。严格大于的停止条件把等号边界留给完整距离和主键排序。修订版还通过了带过滤、更新、删除、回滚和重启的同距用例。",
+      "retest_output": "Indexed search tie order, filtering, mutation and rollback/restart: passed"
+    },
+    {
+      "id": "E06",
+      "actor": "agent",
+      "topic": "独立参考模型与索引维护",
+      "method": "Python 字典保存主键、标签和向量，显式事务用字典快照表示。固定随机序列执行 400 步，包括插入和重复键错误、更新、删除、提交、回滚。参考查询先按标签和主键条件筛选，再计算平方距离并按距离和主键排序。每个查询分别和 exact、ann 比较，最后重启比对主键和标签。",
+      "output": "Seeded 400-step reference model: 145 filtered queries in each mode, with restart state matching the model",
+      "result_source": "Linux 本地参考模型测试标准输出",
+      "interpretation": "在多次事务交错中对照结果，可以同时检验可见记录集合、索引失效和重建。单次静态查询只覆盖建立索引后的初始状态。"
+    },
+    {
+      "id": "E07",
+      "actor": "agent",
+      "topic": "数据体积超过进程地址空间",
+      "method": "使用 RLIMIT_AS 将数据库进程约束为 18 MiB，以 10 行一批写入 1,600 行，每行含 24,000 字符以及向量和标签。重启后在标签等值过滤中检索 q=[12,0] 的四个邻居。",
+      "observed": "查询按顺序返回 [11,13,9,15]，相同距离按主键升序。",
+      "output": "Disk-backed filtered TopK after restart: 38,488,451 bytes with 18,874,368-byte address limit",
+      "result_source": "Linux 本地 verify.py 标准输出",
+      "interpretation": "记录值通过磁盘定位读取，进程可以处理大于地址空间预算的日志。这个限制针对进程虚拟地址空间，正式 cgroup 内存计量还包含页缓存。"
+    },
+    {
+      "id": "E08",
+      "actor": "agent",
+      "topic": "写入和过滤／无过滤查询的本地基准",
+      "method": "生成 10,000 条 128 维记录，100 条一批自动提交。重启后预热一次，测量 1,000 条 exact Top10，其中一半带标签等值过滤。用独立 Python 实现核对每个返回距离、每组各 20 条查询的完整排名，并检查每条查询返回数量、主键唯一性和过滤条件。",
+      "output": "Local benchmark: 100 committed batches 0.208s, 1000 exact queries 0.392s, log 5,523,317 bytes\nAll returned distances checked; independent exact ranking matched 20 unfiltered and 20 filtered queries",
+      "result_source": "Linux 本地 verify.py --benchmark 单轮标准输出",
+      "interpretation": "当前本地负载中精确扫描足以完成查询。日志文件长度反映存储占用，评测 I/O 字节与内存峰值需要由官方统计口径单独测量。"
+    },
+    {
+      "id": "E09",
+      "actor": "agent",
+      "topic": "运行时依赖与 Linux 接口",
+      "method": "以 GCC 13.3 编译 x86_64 静态 ELF。在只放静态程序和 /data 的隔离根目录中运行，发送 CREATE、INSERT、SELECT 和 QUIT，核对每个响应。",
+      "output": "READY\nOK 0\nOK 1\nRESULT 1 1\nid\n10\nEND\nBYE",
+      "result_source": "Linux 用户命名空间与 chroot 标准输出",
+      "interpretation": "该运行只需二进制、标准输入输出和可写的 /data。镜像构建及平台适配需要在实际评测环境继续验证。"
+    },
+    {
+      "id": "E10",
+      "actor": "agent",
+      "topic": "内存和未定义行为检查",
+      "method": "用同时启用 AddressSanitizer 与 UndefinedBehaviorSanitizer 的构建运行 SQL、语句失败、强杀恢复、截断前缀与索引顺序用例。",
+      "output": "SQL, Unicode, float32, filtered TopK, transaction visibility and normal restart: passed\nFailed 348-row INSERT across a log flush and two SIGKILL/restart sequences: passed\nSix log cut points, with two successive recoveries each: passed\nIndexed search tie order, filtering, mutation and rollback/restart: passed",
+      "result_source": "Linux 本地 sanitizer 构建，进程退出码 0",
+      "interpretation": "限地址空间用例在常规静态构建运行，因为 ASan 本身预留大块虚拟地址空间。"
+    }
+  ],
+  "agent_retrospective": [
+    "把协议、执行和日志分开，让后续替换 stdin/stdout 驱动时能复用已验证的核心。当前协议由本地自测定义，官方接口取决于题包。",
+    "磁盘日志是恢复依据。主键目录和投影索引都可从当前可见版本重建，避免索引和表两份独立持久化状态在崩溃后不一致。代价是日志会积累历史版本，重启时间受日志长度影响。",
+    "投影索引只在可证明下界足够时停止。高维数据上单坐标差往往不够大，因此采用有界投影缓存并保留精确扫描路径。",
+    "正式评测仍需核对容器构建上下文、学习材料路径、错误码、语句边界以及资源配置，并执行官方预检和正式用例。"
+  ]
+}
