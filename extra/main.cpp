@@ -1,22 +1,44 @@
 #include "db.hpp"
 
+#include <cerrno>
 #include <charconv>
 #include <csignal>
 #include <iostream>
+#include <system_error>
 #include <type_traits>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace {
 
 volatile std::sig_atomic_t stopping = 0;
+volatile std::sig_atomic_t eof_input = -1;
 
-void stop(int) { stopping = 1; }
+void stop(int) {
+  stopping = 1;
+  const int saved_errno = errno;
+  // A buffered getline may retry a read interrupted by this signal. Redirect
+  // that retry to EOF, including when the signal arrives just before the read.
+  while (::dup2(eof_input, STDIN_FILENO) < 0 && errno == EINTR) {}
+  errno = saved_errno;
+}
 
 void install_signals() {
+  int input[2];
+  if (::pipe2(input, O_CLOEXEC) < 0) {
+    throw std::system_error(errno, std::generic_category(), "open shutdown pipe");
+  }
+  ::close(input[1]);
+  eof_input = input[0];
   struct sigaction action {};
   action.sa_handler = stop;
   ::sigemptyset(&action.sa_mask);
-  ::sigaction(SIGTERM, &action, nullptr);
-  ::sigaction(SIGINT, &action, nullptr);
+  ::sigaddset(&action.sa_mask, SIGTERM);
+  ::sigaddset(&action.sa_mask, SIGINT);
+  if (::sigaction(SIGTERM, &action, nullptr) < 0 || ::sigaction(SIGINT, &action, nullptr) < 0) {
+    throw std::system_error(errno, std::generic_category(), "install shutdown signal");
+  }
 }
 
 std::string_view trim(std::string_view line) {
@@ -128,10 +150,10 @@ void run(const std::filesystem::path& directory, mini::SearchMode mode) {
 int main(int argc, char** argv) {
   std::ios::sync_with_stdio(false);
   std::cin.tie(nullptr);
-  install_signals();
   std::filesystem::path directory = "/data";
   mini::SearchMode mode = mini::SearchMode::exact;
   try {
+    install_signals();
     for (int i = 1; i < argc; ++i) {
       const std::string_view option = argv[i];
       if (option == "--data-dir" && i + 1 < argc) directory = argv[++i];

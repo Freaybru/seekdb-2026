@@ -249,8 +249,14 @@ def atomicity(binary, root):
         db.kill()
     with Session(binary, root) as db:
         assert db.query("SELECT body FROM docs WHERE id=2") == [["acknowledged"]]
+        db.ok("BEGIN")
+        db.ok("DELETE FROM docs WHERE id=2", 1)
+        db.process.terminate()
+        assert db.process.wait(timeout=5) == 0
+    with Session(binary, root) as db:
+        assert db.query("SELECT body FROM docs WHERE id=2") == [["acknowledged"]]
         db.quit()
-    print("Failed 348-row INSERT across a log flush and two SIGKILL/restart sequences: passed")
+    print("Failed 348-row INSERT, two SIGKILL/restarts and graceful SIGTERM rollback: passed")
 
 
 def partial_log(binary, root):
@@ -284,11 +290,13 @@ def partial_log(binary, root):
 def bounded_memory(binary, root):
     limit = 18 * 1024 * 1024
     size, batch = 1600, 10
+    prefix = "x" * 23999
+    suffixes = ("甲", "A", "乙")
     with Session(binary, root, limit) as db:
         db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, body VARCHAR(24000), v VECTOR(2), tag BIGINT)")
-        body = "x" * 24000
         for start in range(0, size, batch):
-            rows = ",".join(f"({i},'{body}','[{i},0]',{i % 2})" for i in range(start, start + batch))
+            rows = ",".join(f"({i},'{prefix}{suffixes[i % 3]}','[{i},0]',{i % 2})"
+                            for i in range(start, start + batch))
             db.ok(f"INSERT INTO t VALUES {rows}", batch)
         db.quit()
     log_size = (root / "minivectordb.log").stat().st_size
@@ -296,11 +304,25 @@ def bounded_memory(binary, root):
     with Session(binary, root, limit) as db:
         assert db.query("SELECT id FROM t WHERE tag = 1 ORDER BY L2_DISTANCE(v,'[12,0]') LIMIT 4") == [
             ["11"], ["13"], ["9"], ["15"]]
+        expected = sorted(range(size), key=lambda key: (suffixes[key % 3], key))
+        assert db.query("SELECT id FROM t ORDER BY body") == [[str(key)] for key in expected]
+        assert db.query("SELECT id FROM t ORDER BY body DESC,tag ASC LIMIT 5") == [
+            ["0"], ["6"], ["12"], ["18"], ["24"]]
+        query = "SELECT id FROM t WHERE id < 12 ORDER BY body LIMIT 2"
+        db.ok("BEGIN")
+        db.ok(f"UPDATE t SET body='{prefix}' WHERE id=0", 1)
+        assert db.query(query) == [["0"], ["1"]]
+        db.ok("ROLLBACK")
+        assert db.query(query) == [["1"], ["4"]]
         db.quit()
-    print(f"Disk-backed filtered TopK after restart: {log_size:,} bytes with {limit:,}-byte address limit")
+    print(f"Disk-backed filtered TopK and VARCHAR ordering: "
+          f"{log_size:,} bytes with {limit:,}-byte address limit")
 
 
 def indexed_ties(binary, root):
+    wide_order = "SELECT id FROM precise ORDER BY L2_DISTANCE(v,'[0,0,0,0]')"
+    wide_top = wide_order + " LIMIT 3"
+    wide_expected = [["3"], ["1"], ["2"]]
     with Session(binary, root) as db:
         db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR(1), label VARCHAR(1))")
         db.ok("INSERT INTO t VALUES (1,'[-1]','x'),(2,'[1]','x'),(3,'[0]','y'),(4,'[-4]','x')", 4)
@@ -316,12 +338,23 @@ def indexed_ties(binary, root):
         assert db.query(query) == [["1"]]
         db.ok("ROLLBACK")
         assert db.query(query) == [["1"]]
+        db.ok("CREATE TABLE precise (id BIGINT PRIMARY KEY, v VECTOR(4))")
+        db.ok("INSERT INTO precise VALUES (1,'[1,1,1,134217728]'),"
+              "(2,'[134217728,1,1,1]'),(3,'[134217728,0,0,0]')", 3)
+        db.ok("CREATE VECTOR INDEX precise_ix ON precise(v)")
+        for mode in ("exact", "ann"):
+            db.ok(f"MODE {mode}")
+            rows = db.query(wide_top)
+            assert rows == wide_expected, (mode, rows, wide_expected)
+            assert db.query(wide_order + " LIMIT 1") == wide_expected[:1]
+        assert db.query(wide_order + ", id") == wide_expected
         db.quit()
     with Session(binary, root) as db:
         db.ok("MODE ann")
         assert db.query(query) == [["1"]]
+        assert db.query(wide_top) == wide_expected
         db.quit()
-    print("Indexed search tie order, filtering, mutation and rollback/restart: passed")
+    print("Indexed search ties, extreme float32 ranking, filtering and rollback/restart: passed")
 
 
 def benchmark(binary, root):

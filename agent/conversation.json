@@ -5,7 +5,7 @@
   "context": {
     "assignment": "实现单机单客户端的轻量向量数据库。功能准入覆盖 SQL、过滤 TopK、向量索引、持久化、事务和进程崩溃恢复。性能项还约束召回率与资源。",
     "constraints": "参赛者要求本地改动仅放在 extra，远程交付按赛题布局，保护本地信息。评测题面要求源码、Dockerfile 与学习材料来自同一次提交。",
-    "attribution": "参赛者的原始任务、后续复测要求和范围澄清保留在 U01–U03。实现选择、实验设计、实验执行及解释由 Agent 完成，工具输出单独标记。选手自己的技术分析、独立验证或结果解释尚未纳入这份材料。"
+    "attribution": "参赛者的原始任务、复测要求和范围澄清保留在 U01–U04。实现选择、实验设计、实验执行及解释由 Agent 完成，工具输出单独标记。选手自己的技术分析、独立验证或结果解释尚未纳入这份材料。"
   },
   "conversations": [
     {
@@ -57,6 +57,16 @@
       "id": "A07",
       "role": "assistant",
       "content": "公开包明确了 32 条 SQL 的输入和预期结果，但还未公开进程通信协议。我已把这 5 组用例接入自测，并调整了提交布局：远程仓库根目录提供 Dockerfile，学习材料放在题面指定的 `agent/conversation.json`。"
+    },
+    {
+      "id": "U04",
+      "role": "user",
+      "content": "[https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6](https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6)\n这个是最新的题目链接，再检查一遍是否有没做到的，若有将其改进"
+    },
+    {
+      "id": "A08",
+      "role": "assistant",
+      "content": "旧版复现了两个问题：18 MiB 限制下，约 37 MiB 数据按长字符串排序会内存不足；向量分量大小相差悬殊时，浮点累加还会打乱本应并列的结果。两个修复已写入，接下来会用同样的反例复测。"
     }
   ],
   "experiments": [
@@ -173,6 +183,46 @@
       "output": "Verified linux/amd64 OCI image entrypoint, arguments, /data volume and root filesystem\nOffline image filesystem: committed row retained and open transaction rolled back on restart\nOfficial public samples: 5 cases, 32 statements passed",
       "result_source": "本地 BuildKit 镜像检查与镜像内二进制回归的标准输出",
       "interpretation": "验证覆盖根目录构建上下文、实际编译产物和断网持久化。官方预检仍需要配套评测驱动。"
+    },
+    {
+      "id": "E13",
+      "actor": "agent",
+      "topic": "长 VARCHAR 排序的内存反例与复测",
+      "method": "用 1,600 条含 24,000 字符正文的记录构造 38,490,585 字节日志。正文共享长前缀，末字符为三种值。将进程地址空间限制为 18 MiB，重启后执行过滤 TopK、全量 ORDER BY body、降序多键 LIMIT，以及事务中缩短字符串后排序与回滚。",
+      "baseline_output": "minivectordb: std::bad_alloc\nBaseline bounded_memory fails: unexpected EOF (exit=None)",
+      "output": "Disk-backed filtered TopK and VARCHAR ordering: 38,490,585 bytes with 18,874,368-byte address limit",
+      "result_source": "原提交与修订版的 Linux 进程回归输出",
+      "interpretation": "旧实现会把每个候选字符串完整复制到排序数组，内存随字符串总长度增长。排序键改为日志位置和长度，比较只分块读取内容，并保留 Unicode 码点顺序及主键并列规则。排序元数据仍随候选记录数增长。"
+    },
+    {
+      "id": "E14",
+      "actor": "agent",
+      "topic": "极端量级差下的精确 TopK 排名",
+      "method": "对零查询向量比较 [1,1,1,134217728]、[134217728,1,1,1] 和 [134217728,0,0,0]。前两者的平方距离都等于 2^54+3，第三条等于 2^54，主键依次为 1、2、3。期望顺序为 3、1、2。修订后还用 Python 任意精度整数计算不同符号和指数范围的 float32 精确平方距离，对照 exact、带过滤的 ann 和多键降序。",
+      "baseline_output": "Baseline indexed_ties fails: ('exact', [['2'], ['3'], ['1']], [['3'], ['1'], ['2']])",
+      "output": "Exact integer reference: 156 orderings matched for dimensions 4, 8, 17 and 128",
+      "result_source": "原提交的回归失败和修订版的独立精确整数对照",
+      "interpretation": "大数项先加入时，逐个小平方项可能舍入掉，导致等距关系和邻居顺序被颠倒。普通比较保留 double 快速路径，误差范围重叠时按 float32 的二进制整数表示精确比较，索引也只在可确定下界超过第 K 名时停止。"
+    },
+    {
+      "id": "E15",
+      "actor": "agent",
+      "topic": "stdin 等待时的 SIGTERM 及旧日志兼容",
+      "method": "用原提交建表并落盘。修订版打开相同日志，提交一项更新，再开启事务删除另一行。保持 stdin 打开，向等待输入的进程发送 SIGTERM，要求 5 秒内正常退出。用原提交重新打开该日志，核对已确认的更新和撤销的删除。",
+      "baseline_observed": "修复前保持 stdin 打开时，等待进程退出触发 subprocess.TimeoutExpired，超过 5 秒。",
+      "output": "Previous on-disk data opened by the revision; SIGTERM rolled back only the open transaction",
+      "stress_output": "32 SIGINT/SIGTERM exits with stdin open, including partial lines, all preserved the committed row",
+      "result_source": "Linux 新旧版本兼容和 SIGTERM 退出测试输出",
+      "interpretation": "缓冲读在信号后可能重试。将等待输入转为 EOF，使空闲进程回到正常退出路径并执行事务回滚。旧日志可以直接读取，已经确认的写入不受影响。"
+    },
+    {
+      "id": "E16",
+      "actor": "agent",
+      "topic": "三项修复的最终镜像验证",
+      "method": "从根 Dockerfile 重建 linux/amd64 镜像，核对 stdin 启动入口和 /data 卷。在断网隔离环境执行写入、退出与重启，再对实际镜像内的二进制运行官方公开用例和包括三个反例在内的回归。",
+      "output": "Verified final linux/amd64 OCI image, stdin entrypoint and /data volume\nFinal offline image filesystem: startup, transaction rollback and restart passed\nOfficial public samples: 5 cases, 32 statements passed\nFailed 348-row INSERT, two SIGKILL/restarts and graceful SIGTERM rollback: passed\nIndexed search ties, extreme float32 ranking, filtering and rollback/restart: passed\nDisk-backed filtered TopK and VARCHAR ordering: 38,490,585 bytes with 18,874,368-byte address limit",
+      "result_source": "最终 OCI 镜像检查和镜像内二进制回归的标准输出",
+      "interpretation": "修复版本在提交布局下完成构建，且通过公开 SQL 与本地边界验证。正式隐藏用例、通信格式及平台资源计量仍待组织方驱动验证。"
     }
   ],
   "agent_retrospective": [

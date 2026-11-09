@@ -1,6 +1,7 @@
 #include "log.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <limits>
 #include <system_error>
@@ -128,21 +129,59 @@ void Log::unmap() {
   mapped_size_ = 0;
 }
 
-std::string_view Log::read(uint64_t offset, uint32_t length) {
-  if (offset > end() || length > end() - offset) throw std::runtime_error("log read out of bounds");
+std::optional<std::string_view> Log::cached(uint64_t offset, uint32_t length) const {
   if (offset >= disk_end_) {
     return std::string_view(pending_).substr(offset - disk_end_, length);
   }
-  if (length > disk_end_ - offset) flush();
-  if (mapping_ && offset + length <= mapped_size_) return {mapping_ + offset, length};
-  if (offset < block_start_ || offset + length > block_start_ + block_.size()) {
-    const uint64_t aligned = offset & ~uint64_t{4095};
-    block_start_ = aligned;
-    const uint64_t needed = offset - aligned + length;
-    block_.resize(std::min<uint64_t>(disk_end_ - aligned, std::max<uint64_t>(block_size, needed)));
-    read_disk(aligned, block_.data(), block_.size());
+  if (mapping_ && offset + length <= mapped_size_) {
+    return std::string_view(mapping_ + offset, length);
   }
+  if (offset >= block_start_ && offset + length <= block_start_ + block_.size()) {
+    return std::string_view(block_.data() + (offset - block_start_), length);
+  }
+  return std::nullopt;
+}
+
+std::string_view Log::read(uint64_t offset, uint32_t length) {
+  if (offset > end() || length > end() - offset) throw std::runtime_error("log read out of bounds");
+  if (offset < disk_end_ && length > disk_end_ - offset) flush();
+  if (const auto existing = cached(offset, length)) return *existing;
+  const uint64_t aligned = offset & ~uint64_t{4095};
+  block_start_ = aligned;
+  const uint64_t needed = offset - aligned + length;
+  block_.resize(std::min<uint64_t>(disk_end_ - aligned, std::max<uint64_t>(block_size, needed)));
+  read_disk(aligned, block_.data(), block_.size());
   return {block_.data() + (offset - block_start_), length};
+}
+
+int Log::compare_bytes(uint64_t left, uint32_t left_size, uint64_t right, uint32_t right_size) {
+  if (left > end() || left_size > end() - left || right > end() || right_size > end() - right) {
+    throw std::runtime_error("log comparison out of bounds");
+  }
+  const auto left_cached = cached(left, left_size);
+  const auto right_cached = cached(right, right_size);
+  if (left_cached && right_cached) return left_cached->compare(*right_cached);
+
+  // Each range is inside one row payload. Read misses into separate bounded
+  // buffers so comparing two values leaves the sequential read cache intact.
+  constexpr uint32_t chunk_size = 16 * 1024;
+  std::array<char, chunk_size> left_buffer;
+  std::array<char, chunk_size> right_buffer;
+  const auto piece = [&](uint64_t offset, uint32_t size, char* buffer) -> std::string_view {
+    if (const auto existing = cached(offset, size)) return *existing;
+    read_disk(offset, buffer, size);
+    return {buffer, size};
+  };
+  const uint32_t common_size = std::min(left_size, right_size);
+  for (uint32_t at = 0; at < common_size;) {
+    const uint32_t size = std::min(chunk_size, common_size - at);
+    const auto a = piece(left + at, size, left_buffer.data());
+    const auto b = piece(right + at, size, right_buffer.data());
+    const int order = a.compare(b);
+    if (order != 0) return order;
+    at += size;
+  }
+  return (left_size > right_size) - (left_size < right_size);
 }
 
 Frame Log::append(Op op, uint32_t table, int64_t key, uint64_t previous, std::string_view payload) {

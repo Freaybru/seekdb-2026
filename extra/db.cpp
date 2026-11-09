@@ -1,6 +1,8 @@
 #include "db.hpp"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -255,6 +257,110 @@ double squared_distance(std::string_view vector, const std::vector<float>& query
   // Short vectors are faster on the scalar path.
   return query.size() < 8 ? scalar_l2(vector.data(), query.data(), query.size())
                           : distance(vector.data(), query.data(), query.size());
+}
+
+// A binary32 component is an integer significand times 2^(shift - 149).
+// Accumulate squared distances in units of 2^-298 only for close comparisons.
+// A finite component difference is less than 2^129, and dimensions are
+// below 2^30, so the sum needs at most 586 bits.
+class ExactSquare {
+ public:
+  void add(uint64_t coefficient, unsigned shift, bool subtract = false) {
+    const size_t index = shift / 64;
+    const unsigned bits = shift % 64;
+    const uint64_t low = coefficient << bits;
+    const uint64_t high = bits ? coefficient >> (64 - bits) : 0;
+    if (subtract) {
+      subtract_word(index, low);
+      subtract_word(index + 1, high);
+    } else {
+      add_word(index, low);
+      add_word(index + 1, high);
+    }
+  }
+
+  int compare_to(const ExactSquare& other) const {
+    for (size_t i = words_.size(); i != 0;) {
+      --i;
+      const int order = compare(words_[i], other.words_[i]);
+      if (order != 0) return order;
+    }
+    return 0;
+  }
+
+ private:
+  void add_word(size_t index, uint64_t value) {
+    while (value) {
+      const uint64_t sum = words_[index] + value;
+      value = sum < words_[index];
+      words_[index++] = sum;
+    }
+  }
+
+  void subtract_word(size_t index, uint64_t value) {
+    while (value) {
+      const uint64_t previous = words_[index];
+      words_[index++] = previous - value;
+      value = previous < value;
+    }
+  }
+
+  std::array<uint64_t, 10> words_{};
+};
+
+struct FloatParts {
+  uint64_t significand;
+  unsigned shift;
+  bool negative;
+};
+
+FloatParts float_parts(float value) {
+  static_assert(sizeof(float) == sizeof(uint32_t) && std::numeric_limits<float>::is_iec559 &&
+                std::numeric_limits<float>::digits == 24);
+  const auto bits = std::bit_cast<uint32_t>(value);
+  const unsigned exponent = (bits >> 23) & 0xff;
+  const uint32_t fraction = bits & 0x7fffff;
+  const uint32_t significand = exponent ? fraction | 0x800000u : fraction;
+  return {significand, exponent ? exponent - 1 : 0, (bits >> 31) != 0};
+}
+
+ExactSquare exact_square(std::string_view vector, const std::vector<float>& query) {
+  ExactSquare result;
+  for (size_t i = 0; i < query.size(); ++i) {
+    const auto value = load<float>(vector.substr(i * sizeof(float), sizeof(float)));
+    if (value == query[i]) continue;
+    const auto a = float_parts(value);
+    const auto b = float_parts(query[i]);
+    // Add both squares before a possible subtraction so the sum stays nonnegative.
+    result.add(a.significand * a.significand, 2 * a.shift);
+    result.add(b.significand * b.significand, 2 * b.shift);
+    result.add(a.significand * b.significand, a.shift + b.shift + 1, a.negative == b.negative);
+  }
+  return result;
+}
+
+double distance_margin(size_t dimension) {
+  // This covers both operands' rounding from subtraction, multiplication and
+  // accumulation. Float32 inputs cannot overflow or underflow these double sums.
+  return (4.0 * dimension + 16.0) * std::numeric_limits<double>::epsilon();
+}
+
+int separated_squares(double left, double right, double margin) {
+  if (std::abs(left - right) <= std::max(left, right) * margin) return 0;
+  return compare(left, right);
+}
+
+int compare_distance(Log& log, RowRef left, double a, RowRef right, double b,
+                     const std::vector<float>& query, double margin) {
+  if (const int order = separated_squares(a, b, margin); order != 0) return order;
+  if ((a == 0 && b == 0) || left.offset == right.offset) return 0;
+  const auto length = static_cast<uint32_t>(query.size() * sizeof(float));
+  const uint64_t left_vector = left.offset + Frame::header_size;
+  const uint64_t right_vector = right.offset + Frame::header_size;
+  if (log.compare_bytes(left_vector, length, right_vector, length) == 0) return 0;
+  const auto left_square = exact_square(log.read(left_vector, length), query);
+  const auto right_square = exact_square(log.read(right_vector, length), query);
+  return left_square.compare_to(right_square);
 }
 
 }  // namespace
@@ -571,7 +677,12 @@ struct Neighbor {
   double squared;
 };
 
-using SortValue = std::variant<int64_t, std::string, double>;
+struct TextPosition {
+  uint64_t offset;
+  uint32_t length;
+};
+
+using SortValue = std::variant<int64_t, TextPosition, double>;
 struct OrderedRow {
   Selection selection;
   std::vector<SortValue> values;
@@ -722,9 +833,12 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
   } else if (order.size() == 1 && order.front().expression.query != missing) {
     const size_t query = order.front().expression.query;
     const bool descending = order.front().descending;
+    const double margin = distance_margin(queries[query].size());
     const auto better = [&](const Neighbor& a, const Neighbor& b) {
-      if (a.squared == b.squared) return a.selection.key < b.selection.key;
-      return descending ? a.squared > b.squared : a.squared < b.squared;
+      const int cmp = compare_distance(log_, a.selection.row, a.squared, b.selection.row,
+                                       b.squared, queries[query], margin);
+      if (cmp == 0) return a.selection.key < b.selection.key;
+      return descending ? cmp > 0 : cmp < 0;
     };
     std::vector<Neighbor> nearest;
     const bool bounded = statement.limit.has_value();
@@ -753,7 +867,10 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
         const double right_delta = right < current.index.size() ? current.index[right].pivot - pivot
                                                                : std::numeric_limits<double>::infinity();
         const double delta = std::min(left_delta, right_delta);
-        if (nearest.size() == limit && delta * delta > nearest.front().squared) break;
+        if (nearest.size() == limit &&
+            separated_squares(delta * delta, nearest.front().squared, margin) > 0) {
+          break;
+        }
         const auto& entry = left_delta < right_delta ? current.index[--left] : current.index[right++];
         if (range.contains(entry.key)) probe(entry.key, entry.row);
       }
@@ -766,9 +883,20 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
   } else {
     const auto better = [&](const OrderedRow& a, const OrderedRow& b) {
       for (size_t i = 0; i < order.size(); ++i) {
-        if (a.values[i] != b.values[i]) {
-          return order[i].descending ? a.values[i] > b.values[i] : a.values[i] < b.values[i];
+        const auto query = order[i].expression.query;
+        int cmp;
+        if (query != missing) {
+          cmp = compare_distance(log_, a.selection.row, std::get<double>(a.values[i]),
+                                 b.selection.row, std::get<double>(b.values[i]),
+                                 queries[query], distance_margin(queries[query].size()));
+        } else if (const auto* number = std::get_if<int64_t>(&a.values[i])) {
+          cmp = compare(*number, std::get<int64_t>(b.values[i]));
+        } else {
+          const auto left = std::get<TextPosition>(a.values[i]);
+          const auto right = std::get<TextPosition>(b.values[i]);
+          cmp = log_.compare_bytes(left.offset, left.length, right.offset, right.length);
         }
+        if (cmp != 0) return order[i].descending ? cmp > 0 : cmp < 0;
       }
       return a.selection.key < b.selection.key;
     };
@@ -786,7 +914,10 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
         } else if (const auto* number = std::get_if<int64_t>(&decoded[expression.column])) {
           entry.values.emplace_back(*number);
         } else {
-          entry.values.emplace_back(std::string(std::get<std::string_view>(decoded[expression.column])));
+          const auto text = std::get<std::string_view>(decoded[expression.column]);
+          const auto relative = static_cast<uint64_t>(text.data() - bytes.data());
+          entry.values.emplace_back(TextPosition{row->second.offset + Frame::header_size + relative,
+                                                 static_cast<uint32_t>(text.size())});
         }
       }
       collect(sorted, std::move(entry), limit, statement.limit.has_value(), better);

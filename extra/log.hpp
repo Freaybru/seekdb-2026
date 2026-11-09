@@ -78,11 +78,13 @@ class Log {
   std::optional<Frame> frame_at(uint64_t offset, uint64_t limit);
   Frame frame_before(uint64_t end);
   std::string_view read(uint64_t offset, uint32_t length);
+  int compare_bytes(uint64_t left, uint32_t left_size, uint64_t right, uint32_t right_size);
   void prepare_reads();
 
  private:
   void flush();
   void unmap();
+  std::optional<std::string_view> cached(uint64_t offset, uint32_t length) const;
   void read_disk(uint64_t offset, char* destination, size_t length);
   void write_disk(uint64_t offset, std::string_view data);
 
