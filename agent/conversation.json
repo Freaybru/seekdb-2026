@@ -5,7 +5,7 @@
   "context": {
     "assignment": "实现单机单客户端的轻量向量数据库。功能准入覆盖 SQL、过滤 TopK、向量索引、持久化、事务和进程崩溃恢复。性能项还约束召回率与资源。",
     "constraints": "参赛者要求本地改动仅放在 extra，远程交付按赛题布局，保护本地信息。评测题面要求源码、Dockerfile 与学习材料来自同一次提交。",
-    "attribution": "参赛者的原始任务、复测要求和范围澄清保留在 U01–U04。实现选择、实验设计、实验执行及解释由 Agent 完成，工具输出单独标记。选手自己的技术分析、独立验证或结果解释尚未纳入这份材料。"
+    "attribution": "参赛者的原始任务、复测要求和范围澄清保留在 U01–U05。实现选择、实验设计、实验执行及解释由 Agent 完成，工具输出单独标记。选手自己的技术分析、独立验证或结果解释尚未纳入这份材料。"
   },
   "conversations": [
     {
@@ -67,6 +67,11 @@
       "id": "A08",
       "role": "assistant",
       "content": "旧版复现了两个问题：18 MiB 限制下，约 37 MiB 数据按长字符串排序会内存不足；向量分量大小相差悬殊时，浮点累加还会打乱本应并列的结果。两个修复已写入，接下来会用同样的反例复测。"
+    },
+    {
+      "id": "U05",
+      "role": "user",
+      "content": "那就继续另想办法改进"
     }
   ],
   "experiments": [
@@ -223,6 +228,26 @@
       "output": "Verified final linux/amd64 OCI image, stdin entrypoint and /data volume\nFinal offline image filesystem: startup, transaction rollback and restart passed\nOfficial public samples: 5 cases, 32 statements passed\nFailed 348-row INSERT, two SIGKILL/restarts and graceful SIGTERM rollback: passed\nIndexed search ties, extreme float32 ranking, filtering and rollback/restart: passed\nDisk-backed filtered TopK and VARCHAR ordering: 38,490,585 bytes with 18,874,368-byte address limit",
       "result_source": "最终 OCI 镜像检查和镜像内二进制回归的标准输出",
       "interpretation": "修复版本在提交布局下完成构建，且通过公开 SQL 与本地边界验证。正式隐藏用例、通信格式及平台资源计量仍待组织方驱动验证。"
+    },
+    {
+      "id": "E17",
+      "actor": "agent",
+      "topic": "乱序大表 TopK 的进程读取量",
+      "method": "将 8,192 行按固定随机顺序写入，每行含 8,192 字符正文、二维向量和标签。两版程序在 18 MiB 地址空间上限下打开同一份旧版日志，分别运行无过滤、标签过滤和主键区间 Top10。用 Python 按距离和主键计算预期结果，以查询前后 Linux rchar 的差值统计进程读取字节。",
+      "baseline_output": "Shuffled log: 67,543,171 bytes, address limit 18,874,368 bytes\nUnfiltered exact Top10: 2,137,251,954 bytes read, 13.225s\nFiltered exact Top10: 2,133,844,008 bytes read, 11.344s\nPrimary-key range Top10: 521,482,987 bytes read, 2.765s",
+      "output": "Shuffled log: 67,543,171 bytes, address limit 18,874,368 bytes\nUnfiltered exact Top10: 33,607,909 bytes read, 1.338s\nFiltered exact Top10: 85,067,571 bytes read, 1.395s\nPrimary-key range Top10: 8,192,122 bytes read, 0.340s",
+      "result_source": "同一磁盘日志的新旧 Linux 进程对照，两版查询均与预期主键列表一致",
+      "interpretation": "按主键扫描会频繁跳到日志中的不同位置，固定预读窗口放大读取。修订后只在相邻位置扩大窗口，无标量过滤的距离扫描只读向量字段。rchar 是进程读取口径，正式物理 I/O 和超时限制仍待平台复验。"
+    },
+    {
+      "id": "E18",
+      "actor": "agent",
+      "topic": "同值更新的持久化开销",
+      "method": "分别用原提交和修订版重复更新同一条记录十次，赋值使用不同的向量字面写法但编码后的值相同。逐条核对影响行数为 1，比较更新前后的日志长度。",
+      "baseline_output": "Ten same-value UPDATEs: 850 extra WAL bytes",
+      "output": "Ten same-value UPDATEs: 0 extra WAL bytes",
+      "result_source": "Linux 本地新旧进程对照输出",
+      "interpretation": "当更新后的行编码与原行相同，复用已有版本即可保留相同的查询结果和匹配行数。更新值仍按原规则校验。"
     }
   ],
   "agent_retrospective": [

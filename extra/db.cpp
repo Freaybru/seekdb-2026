@@ -582,8 +582,10 @@ uint64_t Database::write(const Update& statement) {
         bytes += before.substr(0, before.size() - reader.remaining());
       }
     }
-    apply(log_.append(Op::put, current.id, row->first, row->second.offset, bytes));
     ++affected;
+    if (bytes != old) {
+      apply(log_.append(Op::put, current.id, row->first, row->second.offset, bytes));
+    }
   }
   return affected;
 }
@@ -762,8 +764,10 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
   const auto [first, last] = range.iterators(current.rows);
   std::vector<Cell> decoded(current.columns.size());
   std::vector<Cell> output(projections.size());
-  const bool project_payload = std::any_of(projections.begin(), projections.end(),
-      [&](const BoundExpression& projection) { return projection.column != current.primary; });
+  const bool project_columns = std::any_of(projections.begin(), projections.end(),
+      [&](const BoundExpression& projection) {
+        return projection.query == missing && projection.column != current.primary;
+      });
 
   const auto accepted = [&](int64_t key, std::string_view bytes) {
     if (filters.empty()) return true;
@@ -773,10 +777,13 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
   const auto distance = [&](std::string_view bytes, size_t query) {
     return squared_distance(bytes.substr(0, current.vector_bytes), queries[query]);
   };
+  const auto vector_payload = [&](RowRef row) {
+    return log_.read(row.offset + Frame::header_size, current.vector_bytes);
+  };
   const auto emit = [&](Selection selection, size_t known_query = missing, double known_square = 0) {
     std::string_view bytes;
     decoded[current.primary] = selection.key;
-    if (project_payload) {
+    if (project_columns) {
       bytes = payload(log_, selection.row);
       decode(current, selection.key, bytes, decoded);
     }
@@ -785,6 +792,9 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
       if (expression.query == missing) {
         output[i] = decoded[expression.column];
       } else {
+        if (expression.query != known_query && bytes.empty()) {
+          bytes = vector_payload(selection.row);
+        }
         const double square = expression.query == known_query
             ? known_square : distance(bytes, expression.query);
         output[i] = std::sqrt(square);
@@ -844,7 +854,7 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
     const bool bounded = statement.limit.has_value();
     if (bounded) nearest.reserve(std::min<size_t>(limit, 1024));
     const auto probe = [&](int64_t key, RowRef row) {
-      const auto bytes = payload(log_, row);
+      const auto bytes = filters.empty() ? vector_payload(row) : payload(log_, row);
       if (accepted(key, bytes)) {
         collect(nearest, Neighbor{{key, row}, distance(bytes, query)}, limit, bounded, better);
       }

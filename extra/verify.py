@@ -176,6 +176,10 @@ def functional(binary, root):
         db.ok("INSERT INTO docs (id, score, label, v) VALUES "
               "(4,5,'猫🦊é','[3,4]'),(2,5,'猫🦊é','[0,5]'),(5,3,'z','[0,0]'),"
               "(-9223372036854775808,2,'z','[1,1]'),(9223372036854775807,4,'a','[3,0]')", 5)
+        log = root / "minivectordb.log"
+        before = log.stat().st_size
+        db.ok("UPDATE docs SET v='[3.0,4e0]',score=5 WHERE id=4", 1)
+        assert log.stat().st_size == before
         assert db.query("SELECT id, label FROM DOCS WHERE score >= 4 AND (label > 'z') "
                         "ORDER BY score DESC LIMIT 4", ["id", "label"]) == [
                             ["2", "猫🦊é"], ["4", "猫🦊é"]]
@@ -287,21 +291,33 @@ def partial_log(binary, root):
     print("Six log cut points, with two successive recoveries each: passed")
 
 
+def process_read_chars(pid):
+    counters = Path(f"/proc/{pid}/io").read_text(encoding="ascii").splitlines()
+    return int(next(line.split()[1] for line in counters if line.startswith("rchar:")))
+
+
 def bounded_memory(binary, root):
     limit = 18 * 1024 * 1024
     size, batch = 1600, 10
     prefix = "x" * 23999
     suffixes = ("甲", "A", "乙")
+    keys = list(range(size))
+    random.Random(48012).shuffle(keys)
     with Session(binary, root, limit) as db:
         db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, body VARCHAR(24000), v VECTOR(2), tag BIGINT)")
         for start in range(0, size, batch):
             rows = ",".join(f"({i},'{prefix}{suffixes[i % 3]}','[{i},0]',{i % 2})"
-                            for i in range(start, start + batch))
+                            for i in keys[start:start + batch])
             db.ok(f"INSERT INTO t VALUES {rows}", batch)
         db.quit()
     log_size = (root / "minivectordb.log").stat().st_size
     assert log_size > 2 * limit, (log_size, limit)
     with Session(binary, root, limit) as db:
+        before = process_read_chars(db.process.pid)
+        assert db.query("SELECT id,L2_DISTANCE(v,'[12,0]') AS d FROM t ORDER BY d LIMIT 4") == [
+            ["12", "0"], ["11", "1"], ["13", "1"], ["10", "2"]]
+        read_chars = process_read_chars(db.process.pid) - before
+        assert read_chars < log_size // 2, (read_chars, log_size)
         assert db.query("SELECT id FROM t WHERE tag = 1 ORDER BY L2_DISTANCE(v,'[12,0]') LIMIT 4") == [
             ["11"], ["13"], ["9"], ["15"]]
         expected = sorted(range(size), key=lambda key: (suffixes[key % 3], key))
@@ -317,6 +333,7 @@ def bounded_memory(binary, root):
         db.quit()
     print(f"Disk-backed filtered TopK and VARCHAR ordering: "
           f"{log_size:,} bytes with {limit:,}-byte address limit")
+    print(f"Vector-only TopK on shuffled data: {read_chars:,} bytes read by the process")
 
 
 def indexed_ties(binary, root):

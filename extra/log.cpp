@@ -19,6 +19,7 @@ constexpr std::string_view magic = "MINIVDB1";
 static_assert(magic.size() == Log::start);
 constexpr uint32_t header_size = Frame::header_size;
 constexpr uint32_t frame_overhead = header_size + sizeof(uint32_t);
+constexpr uint64_t read_page = 4 * 1024;
 constexpr size_t block_size = 256 * 1024;
 constexpr size_t map_limit = 16 * 1024 * 1024;
 
@@ -146,10 +147,15 @@ std::string_view Log::read(uint64_t offset, uint32_t length) {
   if (offset > end() || length > end() - offset) throw std::runtime_error("log read out of bounds");
   if (offset < disk_end_ && length > disk_end_ - offset) flush();
   if (const auto existing = cached(offset, length)) return *existing;
-  const uint64_t aligned = offset & ~uint64_t{4095};
+  const uint64_t aligned = offset & ~(read_page - 1);
+  // Grow the window on a forward scan. For a seek to another part of the
+  // log, fetch only the pages needed by this record or field.
+  const bool adjacent = !block_.empty() && aligned >= block_start_ &&
+                        aligned - block_start_ <= block_.size();
+  const uint64_t window = adjacent ? block_size : read_page;
   block_start_ = aligned;
   const uint64_t needed = offset - aligned + length;
-  block_.resize(std::min<uint64_t>(disk_end_ - aligned, std::max<uint64_t>(block_size, needed)));
+  block_.resize(std::min(disk_end_ - aligned, std::max(window, needed)));
   read_disk(aligned, block_.data(), block_.size());
   return {block_.data() + (offset - block_start_), length};
 }
