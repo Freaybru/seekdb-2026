@@ -4,10 +4,10 @@
 
 ## 构建与重启
 
-从仓库根目录运行。镜像使用固定摘要的 GCC 13.3.0 构建阶段，最终镜像只包含静态程序和数据目录。
+从提交分支的仓库根目录运行。根目录的 Dockerfile 从 `extra/` 读取源码，使用固定摘要的 GCC 13.3.0 构建，最终镜像只包含静态程序和数据目录。
 
 ~~~sh
-docker build -t minivectordb extra
+docker build --platform linux/amd64 -t minivectordb .
 mkdir -p extra/.demo-data
 docker run --rm -i --network none -v "$PWD/extra/.demo-data:/data" minivectordb <<'SQL'
 CREATE TABLE docs (id BIGINT PRIMARY KEY, category VARCHAR(16), embedding VECTOR(2));
@@ -40,7 +40,7 @@ SQL
 - `VARCHAR(n)` 按 Unicode 码点计长和比较。向量常量可写成 `'[1,2]'`，入库时转换为有限的 float32。`L2_DISTANCE` 以存储值计算欧氏距离，TopK 在满足过滤条件的行内计算。
 - 支持 `BEGIN`、`COMMIT`、`ROLLBACK`。写语句默认自动提交，显式事务内的成功修改立即可见，失败语句只撤回本条语句。
 
-`main.cpp` 中的文本协议用于本地验证。每行发送一条完整 SQL，可带分号。启动后收到 `READY`。成功写入返回 `OK <影响行数>`，错误返回 `ERROR <代码> <消息>`。查询返回 `RESULT <列数> <行数>`、一行列名、指定数量的数据行及 `END`。列以制表符分隔，字符串转义反斜杠、制表符、换行、回车和 NUL。每个响应立即刷新。`MODE exact` 或 `MODE ann` 切换模式，默认 exact；`QUIT` 关闭并返回 `BYE`，EOF 同样结束会话。正常关闭撤销未提交事务。
+`main.cpp` 中的文本协议用于本地验证。每行发送一条完整 SQL，可带分号。启动后收到 `READY`。成功写入返回 `OK <影响行数>`，错误返回 `ERROR <代码> <消息>`。查询返回 `RESULT <列数> <行数>`、一行列名、指定数量的数据行及 `END`。列以制表符分隔，字符串转义反斜杠、制表符、换行、回车和 NUL。每个响应立即刷新。`MODE exact` 或 `MODE ann` 切换模式，默认 exact。`QUIT` 关闭并返回 `BYE`，EOF 同样结束会话。正常关闭撤销未提交事务。
 
 错误代码覆盖语法（`SYNTAX`）、不支持的语句（`UNSUPPORTED`）、表结构（`SCHEMA`）、值或维度（`VALUE`）、主键重复（`DUPLICATE_KEY`）、表或列不存在（`UNKNOWN_TABLE`、`UNKNOWN_COLUMN`）、重名（`TABLE_EXISTS`、`INDEX_EXISTS`）和事务状态（`TRANSACTION`）。存储故障时进程停止，诊断写到 stderr，由下次启动按日志恢复。
 
@@ -64,4 +64,16 @@ python3 verify.py .build/minivectordb --benchmark
 
 验证覆盖 Unicode 和 float32 边界、带过滤条件的 TopK、同距排序、索引维护、语句原子性、提交和回滚、强杀及重复恢复。限内存测试用 18 MiB 进程地址空间重启并检索超过 36 MiB 的日志。可选基准写入 10,000 条 128 维记录、执行 1,000 个 Top10 查询，对返回距离逐条校验，并用独立穷举抽查两组排名。
 
-官方题面将评测协议、资源配置和公开用例交由配套题包发布。当前验证使用上述本地协议。构建入口为 `extra/Dockerfile`，学习记录为 `extra/agent/conversation.json`。评测端的构建上下文和材料路径仍需与官方配置核对。
+可以从官方快照提取 `mysqltest/`，在同一目录复跑 5 组、32 条公开 SQL。
+
+~~~sh
+git init --bare .build/official.git
+git --git-dir=.build/official.git fetch --depth=1 --no-tags \
+  https://github.com/oceanbase/seekdb.git a3dba559c1e7ebdc48bc990ffb1a4c75d1c1075c
+git --git-dir=.build/official.git archive FETCH_HEAD mysqltest | tar -x -C .build
+python3 verify.py .build/minivectordb --public-suite .build/mysqltest
+~~~
+
+自测为每组创建独立数据目录，按清单逐条检查成功状态、影响行数、列名和结果行。无序结果按多重集合比较，浮点距离使用绝对和相对容差 `1e-5`。公开包的 JSON 文件描述预期结果，进程通信仍使用上述本地协议。正式评测协议和隐藏用例由组织方提供。[官方公开用例说明](https://github.com/oceanbase/seekdb/tree/a3dba559c1e7ebdc48bc990ffb1a4c75d1c1075c/mysqltest)
+
+提交的构建入口为仓库根目录的 `Dockerfile`，学习记录为 `agent/conversation.json`。

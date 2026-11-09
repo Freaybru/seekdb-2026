@@ -1,0 +1,11 @@
+*
+!Dockerfile
+!extra
+extra/*
+!extra/sql.hpp
+!extra/log.hpp
+!extra/db.hpp
+!extra/sql.cpp
+!extra/log.cpp
+!extra/db.cpp
+!extra/main.cpp

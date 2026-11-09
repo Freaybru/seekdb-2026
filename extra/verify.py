@@ -1,9 +1,11 @@
 """Black-box SQL, durability, bounded-memory and optional timing checks."""
 
 import argparse
+import json
 import math
 from pathlib import Path
 import random
+import re
 import resource
 import shutil
 import signal
@@ -60,17 +62,22 @@ class Session:
         assert result.startswith(f"ERROR {code} "), (sql[:120], result)
 
     def query(self, sql, expected_columns=None):
-        header = self.send(sql).split()
-        assert len(header) == 3 and header[0] == "RESULT", (sql[:120], header)
-        width, count = map(int, header[1:])
-        columns = self.read().split("\t")
-        assert len(columns) == width
+        columns, rows = self.read_result(self.send(sql))
         if expected_columns is not None:
             assert columns == expected_columns, columns
+        return rows
+
+    def read_result(self, status):
+        header = status.split()
+        assert len(header) == 3 and header[0] == "RESULT", status
+        width, count = map(int, header[1:])
+        assert width > 0 and count >= 0, status
+        columns = self.read().split("\t")
+        assert len(columns) == width
         rows = [self.read().split("\t") for _ in range(count)]
         assert all(len(row) == width for row in rows), rows
         assert self.read() == "END"
-        return rows
+        return columns, rows
 
     def quit(self):
         assert self.send("QUIT") == "BYE"
@@ -79,6 +86,87 @@ class Session:
     def kill(self):
         self.process.kill()
         assert self.process.wait(timeout=5) == -signal.SIGKILL
+
+
+def unescape_cell(text):
+    escapes = {"\\": "\\", "t": "\t", "n": "\n", "r": "\r", "0": "\0"}
+    return re.sub(r"\\([\\tnr0])", lambda match: escapes[match[1]], text)
+
+
+def matches_row(actual, expected):
+    if len(actual) != len(expected):
+        return False
+    for cell, value in zip(actual, expected):
+        if isinstance(value, float):
+            try:
+                if not math.isclose(float(cell), value, abs_tol=1e-5, rel_tol=1e-5):
+                    return False
+            except ValueError:
+                return False
+        elif cell != str(value):
+            return False
+    return True
+
+
+def check_public_rows(actual, expected, unordered):
+    assert len(actual) == len(expected), (actual, expected)
+    if not unordered:
+        assert all(matches_row(row, wanted) for row, wanted in zip(actual, expected)), (
+            actual, expected)
+        return
+
+    # Match each expected row once. Reassign a previous match if overlapping
+    # distance tolerances give one row more than one possible partner.
+    owners = {}
+
+    def assign(wanted, visited):
+        for index, row in enumerate(actual):
+            if index in visited or not matches_row(row, expected[wanted]):
+                continue
+            visited.add(index)
+            if index not in owners or assign(owners[index], visited):
+                owners[index] = wanted
+                return True
+        return False
+
+    assert all(assign(i, set()) for i in range(len(expected))), (actual, expected)
+
+
+def public_cases(binary, root, suite):
+    manifest = json.loads((suite / "manifest.json").read_text(encoding="utf-8"))
+    total = 0
+    for case in manifest["cases"]:
+        name = case["id"]
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", name), name
+        sql_file = suite / "cases" / f"{name}.test"
+        expected_file = suite / "cases" / f"{name}.result"
+        statements = [line.strip() for line in sql_file.read_text(encoding="utf-8").splitlines()
+                      if line.strip()]
+        expected = json.loads(expected_file.read_text(encoding="utf-8"))
+        assert len(statements) == len(expected) == case["statements"], name
+        with Session(binary, root / name) as db:
+            for index, (sql, check) in enumerate(zip(statements, expected), 1):
+                status = db.send(sql)
+                try:
+                    if status.startswith("RESULT "):
+                        assert "affected_rows" not in check, status
+                        columns, raw_rows = db.read_result(status)
+                        rows = [[unescape_cell(cell) for cell in row] for row in raw_rows]
+                        if "columns" in check:
+                            assert [unescape_cell(column) for column in columns] == check["columns"]
+                        if "rows" in check:
+                            check_public_rows(rows, check["rows"], check.get("unordered", False))
+                    else:
+                        assert re.fullmatch(r"OK [0-9]+", status), status
+                        assert "rows" not in check and "columns" not in check, status
+                        if "affected_rows" in check:
+                            assert int(status[3:]) == check["affected_rows"], status
+                except AssertionError as error:
+                    raise AssertionError(f"{name}, statement {index}: {sql}") from error
+            db.quit()
+        total += len(statements)
+        print(f"Public sample {name}: {len(statements)}/{len(statements)}")
+    print(f"Official public samples: {len(manifest['cases'])} cases, {total} statements passed")
 
 
 def functional(binary, root):
@@ -297,11 +385,14 @@ def benchmark(binary, root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
+    parser.add_argument("--public-suite", type=Path, help="path to the official mysqltest directory")
     parser.add_argument("--benchmark", action="store_true")
     options = parser.parse_args()
     binary = options.binary.resolve(strict=True)
     with TemporaryDirectory(prefix=".verify-", dir=Path(__file__).resolve().parent) as name:
         root = Path(name)
+        if options.public_suite is not None:
+            public_cases(binary, root / "public", options.public_suite)
         functional(binary, root / "sql")
         atomicity(binary, root / "atomic")
         partial_log(binary, root / "partial")
