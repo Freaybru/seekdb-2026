@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <numeric>
 #include <type_traits>
 #include <utility>
@@ -18,6 +19,7 @@ namespace {
 
 constexpr size_t missing = std::numeric_limits<size_t>::max();
 constexpr size_t index_budget = 4 * 1024 * 1024;
+constexpr uint32_t wide_row = 8 * 1024;
 
 struct RowRef {
   uint64_t offset;
@@ -152,6 +154,17 @@ int compare(const T& a, const T& b) {
   return a < b ? -1 : (b < a ? 1 : 0);
 }
 
+bool comparison_holds(Comparison comparison, int order) {
+  switch (comparison) {
+    case Comparison::eq: return order == 0;
+    case Comparison::lt: return order < 0;
+    case Comparison::le: return order <= 0;
+    case Comparison::gt: return order > 0;
+    case Comparison::ge: return order >= 0;
+  }
+  return false;
+}
+
 bool matches(std::span<const Filter> filters, std::span<const Cell> cells) {
   for (const auto& filter : filters) {
     const auto& cell = cells[filter.column];
@@ -159,15 +172,48 @@ bool matches(std::span<const Filter> filters, std::span<const Cell> cells) {
     const int order = number ? compare(std::get<int64_t>(cell), *number)
                              : std::get<std::string_view>(cell).compare(
                                    std::get<std::string_view>(filter.value));
-    switch (filter.comparison) {
-      case Comparison::eq: if (order != 0) return false; break;
-      case Comparison::lt: if (order >= 0) return false; break;
-      case Comparison::le: if (order > 0) return false; break;
-      case Comparison::gt: if (order <= 0) return false; break;
-      case Comparison::ge: if (order < 0) return false; break;
-    }
+    if (!comparison_holds(filter.comparison, order)) return false;
   }
   return true;
+}
+
+// Scalar fields follow the vector in schema order. A VARCHAR length prefix
+// lets us skip unrelated text and compare just the bytes shared with a literal.
+bool matches_wide_row(Log& log, const Table& table, RowRef row, std::span<const Filter> filters) {
+  uint64_t next = row.offset + Frame::header_size;
+  const uint64_t end = next + row.length;
+  const auto take = [&](uint32_t length) {
+    if (length > end - next) throw std::runtime_error("truncated record");
+    const auto start = next;
+    next += length;
+    return start;
+  };
+  take(table.vector_bytes);
+  for (size_t column : table.layout) {
+    if (filters.empty()) return true;
+    if (column == table.vector) continue;
+    const bool text_column = table.columns[column].type == Type::varchar;
+    const uint32_t length = text_column
+        ? load<uint32_t>(log.read(take(sizeof(uint32_t)), sizeof(uint32_t)))
+        : sizeof(int64_t);
+    const uint64_t offset = take(length);
+    if (column != filters.front().column) continue;
+    do {
+      const auto& filter = filters.front();
+      int order;
+      if (text_column) {
+        const auto text = std::get<std::string_view>(filter.value);
+        const auto common = static_cast<uint32_t>(std::min<size_t>(length, text.size()));
+        order = common == 0 ? 0 : log.read(offset, common).compare(text.substr(0, common));
+        if (order == 0) order = compare<size_t>(length, text.size());
+      } else {
+        order = compare(load<int64_t>(log.read(offset, length)), std::get<int64_t>(filter.value));
+      }
+      if (!comparison_holds(filter.comparison, order)) return false;
+      filters = filters.subspan(1);
+    } while (!filters.empty() && filters.front().column == column);
+  }
+  return filters.empty();
 }
 
 struct KeyRange {
@@ -377,7 +423,6 @@ Table& Database::table(std::string_view name) {
 void Database::recover() {
   uint64_t committed = Log::start;
   uint64_t cursor = committed;
-  log_.prepare_reads();
   while (const auto frame = log_.frame_at(cursor, log_.end())) {
     cursor = frame->end();
     if (frame->op == Op::commit) {
@@ -470,8 +515,12 @@ void Database::build_index(Table& current) {
   if (current.index_current) return;
   current.index_current = true;
   if (current.rows.size() > (index_budget - index_bytes_) / sizeof(ProjectionEntry)) return;
-  log_.prepare_reads();
-  current.index.reserve(current.rows.size());
+  try {
+    current.index.reserve(current.rows.size());
+  } catch (const std::bad_alloc&) {
+    // Exact search stays available when the optional projection cannot fit.
+    return;
+  }
   for (const auto& [key, row] : current.rows) {
     const float pivot = load<float>(log_.read(row.offset + Frame::header_size, sizeof(float)));
     current.index.push_back({pivot, key, row});
@@ -710,6 +759,7 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
   Table& current = table(statement.table);
   auto filters = bind_filters(current, statement.filter);
   const KeyRange range = restrict_keys(current, filters);
+  std::ranges::sort(filters, {}, &Filter::column);
 
   std::vector<std::vector<float>> queries;
   const auto bind = [&](const Expression& expression) {
@@ -774,6 +824,11 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
     decode(current, key, bytes, decoded);
     return matches(filters, decoded);
   };
+  const auto included = [&](int64_t key, RowRef row) {
+    if (filters.empty()) return true;
+    if (row.length > wide_row) return matches_wide_row(log_, current, row, filters);
+    return accepted(key, payload(log_, row));
+  };
   const auto distance = [&](std::string_view bytes, size_t query) {
     return squared_distance(bytes.substr(0, current.vector_bytes), queries[query]);
   };
@@ -817,15 +872,12 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
         }
       }
     };
-    const auto included = [&](const Rows::value_type& row) {
-      return filters.empty() || accepted(row.first, payload(log_, row.second));
-    };
     size_t count = 0;
     if (filters.empty() && first == current.rows.begin() && last == current.rows.end()) {
       count = limit;
     } else {
       traverse([&](const auto& row) {
-        count += included(row);
+        count += included(row.first, row.second);
         return count < limit;
       });
     }
@@ -833,7 +885,7 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
     if (count != 0) {
       size_t sent = 0;
       traverse([&](const auto& row) {
-        if (included(row)) {
+        if (included(row.first, row.second)) {
           emit({row.first, row.second});
           ++sent;
         }
@@ -854,9 +906,9 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
     const bool bounded = statement.limit.has_value();
     if (bounded) nearest.reserve(std::min<size_t>(limit, 1024));
     const auto probe = [&](int64_t key, RowRef row) {
-      const auto bytes = filters.empty() ? vector_payload(row) : payload(log_, row);
-      if (accepted(key, bytes)) {
-        collect(nearest, Neighbor{{key, row}, distance(bytes, query)}, limit, bounded, better);
+      if (included(key, row)) {
+        collect(nearest, Neighbor{{key, row}, distance(vector_payload(row), query)},
+                limit, bounded, better);
       }
     };
     if (mode == SearchMode::ann && bounded && !descending && !current.index_name.empty()) {

@@ -1,7 +1,9 @@
 """Black-box SQL, durability, bounded-memory and optional timing checks."""
 
 import argparse
+from array import array
 from contextlib import ExitStack
+import fcntl
 import json
 import math
 from pathlib import Path
@@ -12,7 +14,8 @@ import shutil
 import signal
 import subprocess
 from tempfile import TemporaryDirectory
-from time import perf_counter
+import termios
+from time import perf_counter, sleep
 
 
 class Session:
@@ -155,8 +158,10 @@ def check_public_response(db, sql, check):
 
 
 def public_case(binary, root, suite, case):
-    sql_file = suite / case["test"]
-    expected = json.loads((suite / case["result"]).read_text(encoding="utf-8"))
+    name = case["id"]
+    sql_file = suite / case.get("test", f"cases/{name}.test")
+    result_file = suite / case.get("result", f"cases/{name}.result")
+    expected = json.loads(result_file.read_text(encoding="utf-8"))
     lines = [line.strip(" \t\r") for line in sql_file.read_text(encoding="utf-8").split("\n")]
     count = sum(bool(line) and not line.startswith("--") for line in lines)
     assert count == len(expected) == case["statements"], "SQL and assertion counts differ"
@@ -301,6 +306,42 @@ def atomicity(binary, root):
     print("Failed 348-row INSERT, two SIGKILL/restarts and graceful SIGTERM rollback: passed")
 
 
+def shutdown_backpressure(binary, root):
+    body = "x" * (256 * 1024)
+    with Session(binary, root) as db:
+        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, body VARCHAR(262144))")
+        db.ok(f"INSERT INTO t VALUES (1,'{body}'),(2,'committed')", 2)
+        db.quit()
+    log = root / "minivectordb.log"
+    committed_size = log.stat().st_size
+    for disconnect in (False, True):
+        with Session(binary, root) as db:
+            db.ok("BEGIN")
+            db.ok(f"UPDATE t SET body='{body}' WHERE id=2", 1)
+            assert log.stat().st_size > committed_size
+            pipe = db.process.stdout.fileno()
+            if disconnect:
+                db.process.stdout.close()
+            else:
+                capacity = fcntl.fcntl(pipe, fcntl.F_SETPIPE_SZ, 4096)
+            db.process.stdin.write("SELECT body FROM t WHERE id=1\n")
+            db.process.stdin.flush()
+            if not disconnect:
+                queued = array("i", [0])
+                deadline = perf_counter() + 5
+                while queued[0] < capacity and perf_counter() < deadline:
+                    fcntl.ioctl(pipe, termios.FIONREAD, queued, True)
+                    sleep(0.01)
+                assert queued[0] == capacity, (queued[0], capacity)
+                db.process.terminate()
+            assert db.process.wait(timeout=5) == 0
+        assert log.stat().st_size == committed_size
+    with Session(binary, root) as db:
+        assert db.query("SELECT body FROM t WHERE id=2") == [["committed"]]
+        db.quit()
+    print("Full stdout pipe and disconnected reader both shut down and rolled back")
+
+
 def partial_log(binary, root):
     source = root / "source"
     with Session(binary, source) as db:
@@ -356,8 +397,14 @@ def bounded_memory(binary, root):
             ["12", "0"], ["11", "1"], ["13", "1"], ["10", "2"]]
         read_chars = process_read_chars(db.process.pid) - before
         assert read_chars < log_size // 2, (read_chars, log_size)
+        before = process_read_chars(db.process.pid)
         assert db.query("SELECT id FROM t WHERE tag = 1 ORDER BY L2_DISTANCE(v,'[12,0]') LIMIT 4") == [
             ["11"], ["13"], ["9"], ["15"]]
+        filtered_chars = process_read_chars(db.process.pid) - before
+        assert filtered_chars < 3 * log_size // 4, (filtered_chars, log_size)
+        assert db.query("SELECT id FROM t WHERE body > 'x' AND tag = 1 AND body < 'y' "
+                        "AND id >= 1590 ORDER BY id") == [
+                            [str(key)] for key in range(1591, 1600, 2)]
         expected = sorted(range(size), key=lambda key: (suffixes[key % 3], key))
         assert db.query("SELECT id FROM t ORDER BY body") == [[str(key)] for key in expected]
         assert db.query("SELECT id FROM t ORDER BY body DESC,tag ASC LIMIT 5") == [
@@ -372,6 +419,26 @@ def bounded_memory(binary, root):
     print(f"Disk-backed filtered TopK and VARCHAR ordering: "
           f"{log_size:,} bytes with {limit:,}-byte address limit")
     print(f"Vector-only TopK on shuffled data: {read_chars:,} bytes read by the process")
+    print(f"Filtered TopK on shuffled data: {filtered_chars:,} bytes read by the process")
+
+
+def indexed_memory(binary, root):
+    limit = 14 * 1024 * 1024
+    with Session(binary, root) as db:
+        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR(2), tag BIGINT)")
+        for start in range(0, 100_000, 1000):
+            rows = ",".join(f"({key},'[{key % 193},0]',{key % 2})"
+                            for key in range(start, start + 1000))
+            db.ok(f"INSERT INTO t VALUES {rows}", 1000)
+        db.ok("CREATE VECTOR INDEX ix ON t(v)")
+        db.quit()
+    with Session(binary, root, limit) as db:
+        sql = "SELECT id FROM t WHERE id < 10 AND tag = 1 ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 3"
+        assert db.query(sql) == [["1"], ["3"], ["5"]]
+        db.ok("MODE ann")
+        assert db.query(sql) == [["1"], ["3"], ["5"]]
+        db.quit()
+    print(f"100,000 indexed rows recovered and queried with {limit:,}-byte address limit")
 
 
 def indexed_ties(binary, root):
@@ -483,9 +550,11 @@ def main():
             public_cases(binary, root / "public", options.public_suite)
         functional(binary, root / "sql")
         atomicity(binary, root / "atomic")
+        shutdown_backpressure(binary, root / "backpressure")
         partial_log(binary, root / "partial")
         indexed_ties(binary, root / "index")
         bounded_memory(binary, root / "large")
+        indexed_memory(binary, root / "index-memory")
         if options.benchmark:
             benchmark(binary, root / "bench")
 

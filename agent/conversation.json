@@ -5,7 +5,7 @@
   "context": {
     "assignment": "实现单机单客户端的轻量向量数据库。功能准入覆盖 SQL、过滤 TopK、向量索引、持久化、事务和进程崩溃恢复。性能项还约束召回率与资源。",
     "constraints": "参赛者要求本地改动仅放在 extra，远程交付按赛题布局，保护本地信息。评测题面要求源码、Dockerfile 与学习材料来自同一次提交。",
-    "attribution": "参赛者的原始任务、复测要求和范围澄清保留在 U01–U06。实现选择、实验设计、实验执行及解释由 Agent 完成，工具输出单独标记。选手自己的技术分析、独立验证或结果解释尚未纳入这份材料。"
+    "attribution": "参赛者的原始任务、复测要求和范围澄清保留在 U01–U08。实现选择、实验设计、实验执行及解释由 Agent 完成，工具输出单独标记。选手自己的技术分析、独立验证或结果解释尚未纳入这份材料。"
   },
   "conversations": [
     {
@@ -82,6 +82,16 @@
       "id": "A09",
       "role": "assistant",
       "content": "用 `71196e2` 跑新版题包后，复现了 4 组错误码断言不匹配，其余 16 组通过。我会对齐公开包里的三个语义名，并区分向量维度不符和数值非法。正式驱动仍未随这次更新发布。"
+    },
+    {
+      "id": "U07",
+      "role": "user",
+      "content": "提测平台一天只能提测两次，今天已经消耗了一次。你再想办法改进到你认为可以通过的情况，可以多方面找用例，但是不要让官方用例回退。"
+    },
+    {
+      "id": "U08",
+      "role": "user",
+      "content": "你可以自己随意创建测试，不要让官方用例回退即可。"
     }
   ],
   "experiments": [
@@ -278,6 +288,44 @@
       "output": "Verified linux/amd64 OCI entrypoint and /data volume\nOffline image restart: duplicate key code and committed vector verified\nOfficial public samples: 20 cases, 95 statements passed\nDisk-backed filtered TopK and VARCHAR ordering: 38,490,585 bytes with 18,874,368-byte address limit",
       "result_source": "实际 OCI 镜像配置检查、断网进程和镜像内程序自测的标准输出",
       "interpretation": "镜像构建后的二进制通过了新版公开断言，错误码修订不影响已提交数据的恢复。本次没有取得平台预检或正式评测结果。"
+    },
+    {
+      "id": "E21",
+      "actor": "agent",
+      "topic": "输出写满后的关闭与事务回滚",
+      "method": "用基线提交 596cfcbe97ca76c2ff81299f429c0d295c88dbd7 和修订版各写入一条 256 KiB 正文。查询该行但停止读取 stdout，确认管道写满后发送 SIGTERM。修订版回归另用一个已经刷出日志的未提交更新，分别在写满 stdout 和主动断开读端时检查退出码与日志截断。重启核对已提交内容。",
+      "baseline_output": "SIGTERM with full 65,536-byte stdout pipe: blocked for 2s",
+      "output": "SIGTERM with full 65,536-byte stdout pipe: 0, 0.003s\nFull stdout pipe and disconnected reader both shut down and rolled back",
+      "result_source": "Linux 进程退出、日志长度和重启查询对照",
+      "interpretation": "关闭信号还需要中断受阻的写操作。输出端失效后退出响应循环并撤销已刷出但未提交的变更，已经确认的提交仍然保留。"
+    },
+    {
+      "id": "E22",
+      "actor": "agent",
+      "topic": "限地址空间重启与宽行过滤读取量",
+      "method": "对比 100,000 行二维向量有无索引时的启动和 TopK，固定使用同一套插入语句。基线带索引日志为 4,803,383 字节。另在同一份基线日志上比较 1,600 条乱序宽行的过滤查询，按同一预期主键列表复核七次并计算进程 rchar 中位数。",
+      "baseline_output": "14–16 MiB: plain database passed, indexed database exited with std::bad_alloc\nFiltered TopK: 41,756,542 bytes\nScalar filters: 83,430,981 bytes",
+      "output": "11 MiB: plain and indexed databases started and returned the expected ANN results\nFiltered TopK: 16,423,992 bytes\nScalar filters: 28,309,433 bytes",
+      "result_source": "Linux 限地址空间测试及同一旧日志上的查询与读计数对照",
+      "interpretation": "恢复按块读取日志，保留主键目录需要的地址空间。投影分配失败后可使用精确路径。宽行过滤只读取必要字段，进程读取量降低。额外的定位读取在跨系统挂载文件系统上增加了耗时，两类查询在 Linux 内存文件系统中的中位数则分别从 3.8 和 7.7 毫秒降到 1.4 和 2.7 毫秒。"
+    },
+    {
+      "id": "E23",
+      "actor": "agent",
+      "topic": "独立模型对照与真实 I/O 故障注入",
+      "method": "以六个固定种子生成 CRUD、BIGINT 边界、Unicode、过滤排序、事务、失效多行插入和 exact/ann 查询。Python 单独维护提交状态，以存储后 float32 的整数表示计算距离排序。用测试构建在 pwrite 部分提交帧、fdatasync 后应答前、恢复截断前和恢复截断后四个位置强杀进程。另用 ASan 和 UBSan 运行公开断言、恢复和随机模型用例。",
+      "output": "Differential model: 1,920 steps passed\nSIGKILL restarts: 90\nann queries: 167\nexact queries: 183\nSIGKILL at four real I/O fault points: partial commit, durable-before-reply, before recovery truncate, after recovery truncate; verified writes after recovery",
+      "result_source": "Linux 随机模型对照、动态故障注入及地址和未定义行为检查工具的运行输出",
+      "interpretation": "部分提交帧恢复到上一提交，完整落盘但尚未回复的提交能完整恢复。恢复被反复中断后仍保留已确认状态，并可继续写入。随机模型和检查工具也复核了新读取路径的语义。"
+    },
+    {
+      "id": "E24",
+      "actor": "agent",
+      "topic": "最终镜像中两版公开题包和高维限内存对照",
+      "method": "用提交的 Dockerfile 构建 linux/amd64 OCI 镜像并断网启动重启。修复自测读取早期无路径字段的清单后，用镜像内二进制复跑早期题包 a3dba559c1e7ebdc48bc990ffb1a4c75d1c1075c 和当前题包 9f6df2ba5acf871376e22b64a3d0724e4b575044。在 18 MiB 地址空间限制下，以独立整数距离对照一组 512 维数据的 exact、ann、事务回滚与强杀后的结果。",
+      "output": "Official public samples: 5 cases, 32 statements passed\nOfficial public samples: 20 cases, 95 statements passed\n12,000 rows × 512 dimensions, 43,108,037-byte log, 18,874,368-byte address limit\n108 exact/ann queries matched independent integer-distance rankings",
+      "result_source": "实际 OCI 镜像的启动检查、两版公开回归及高维自建数据运行输出",
+      "interpretation": "两版公开输入按各自清单全部执行通过。自建高维数据覆盖过滤、空集、K 大于命中数、事务内更新与回滚和强杀重启。正式评测驱动及保留用例仍需由平台验证。"
     }
   ],
   "agent_retrospective": [

@@ -18,9 +18,11 @@ volatile std::sig_atomic_t eof_input = -1;
 void stop(int) {
   stopping = 1;
   const int saved_errno = errno;
-  // A buffered getline may retry a read interrupted by this signal. Redirect
-  // that retry to EOF, including when the signal arrives just before the read.
+  // A buffered stream can retry an interrupted read or write. The read end of
+  // an empty pipe gives EOF on stdin and rejects writes to stdout. Keep both
+  // descriptors occupied so opening a log cannot accidentally reuse them.
   while (::dup2(eof_input, STDIN_FILENO) < 0 && errno == EINTR) {}
+  while (::dup2(eof_input, STDOUT_FILENO) < 0 && errno == EINTR) {}
   errno = saved_errno;
 }
 
@@ -38,6 +40,10 @@ void install_signals() {
   ::sigaddset(&action.sa_mask, SIGINT);
   if (::sigaction(SIGTERM, &action, nullptr) < 0 || ::sigaction(SIGINT, &action, nullptr) < 0) {
     throw std::system_error(errno, std::generic_category(), "install shutdown signal");
+  }
+  action.sa_handler = SIG_IGN;
+  if (::sigaction(SIGPIPE, &action, nullptr) < 0) {
+    throw std::system_error(errno, std::generic_category(), "ignore broken stdout pipe");
   }
 }
 
@@ -115,8 +121,7 @@ mini::SearchMode mode_value(std::string_view mode) {
   throw mini::SqlError("MODE", "expected exact or ann");
 }
 
-void run(const std::filesystem::path& directory, mini::SearchMode mode) {
-  mini::Database db(directory);
+void serve(mini::Database& db, mini::SearchMode mode) {
   TextProtocol protocol;
   std::cout << "READY\n" << std::flush;
   std::string line;
@@ -141,6 +146,16 @@ void run(const std::filesystem::path& directory, mini::SearchMode mode) {
     }
     std::cout.flush();
     if (!std::cout) break;
+  }
+}
+
+void run(const std::filesystem::path& directory, mini::SearchMode mode) {
+  mini::Database db(directory);
+  std::cout.exceptions(std::ios::badbit);
+  try {
+    serve(db, mode);
+  } catch (const std::ios_base::failure&) {
+    if (!std::cout.bad()) throw;
   }
   db.close();
 }
