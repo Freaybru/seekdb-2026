@@ -1,9 +1,12 @@
 #include "db.hpp"
+#include "wire.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <charconv>
 #include <csignal>
 #include <iostream>
+#include <limits>
 #include <system_error>
 #include <type_traits>
 
@@ -11,6 +14,9 @@
 #include <unistd.h>
 
 namespace {
+
+constexpr std::string_view whitespace = " \r\n\t\f";
+enum class Input { json, line, sql };
 
 volatile std::sig_atomic_t stopping = 0;
 volatile std::sig_atomic_t eof_input = -1;
@@ -48,10 +54,63 @@ void install_signals() {
 }
 
 std::string_view trim(std::string_view line) {
-  constexpr std::string_view spaces = " \r\t\f";
-  const auto start = line.find_first_not_of(spaces);
+  const auto start = line.find_first_not_of(whitespace);
   if (start == line.npos) return {};
-  return line.substr(start, line.find_last_not_of(spaces) - start + 1);
+  return line.substr(start, line.find_last_not_of(whitespace) - start + 1);
+}
+
+bool read_sql(std::string& statement) {
+  statement.clear();
+  char delimiter = 0;
+  for (char ch; !stopping && std::cin.get(ch);) {
+    if (delimiter) {
+      statement.push_back(ch);
+      if (ch == delimiter) delimiter = 0;
+      else if (delimiter == '\'' && ch == '\\' && std::cin.get(ch)) statement.push_back(ch);
+      continue;
+    }
+    if (ch == ';') return true;
+    bool line_comment = ch == '#';
+    if (ch == '-' && std::cin.peek() == '-') {
+      std::cin.get();
+      const int next = std::cin.peek();
+      line_comment = next == std::char_traits<char>::eof() ||
+                     whitespace.find(static_cast<char>(next)) != whitespace.npos;
+      if (!line_comment) {
+        statement += "--";
+        continue;
+      }
+    }
+    if (line_comment) {
+      std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+      statement.push_back(' ');
+      continue;
+    }
+    if (ch == '/' && std::cin.peek() == '*') {
+      std::cin.get();
+      bool closed = false;
+      while (!stopping && std::cin.get(ch)) {
+        if (ch == '*' && std::cin.peek() == '/') {
+          std::cin.get();
+          closed = true;
+          break;
+        }
+      }
+      statement += closed ? " " : " /*";
+      continue;
+    }
+    if (ch == '\'' || ch == 0x60) delimiter = ch;
+    else if (ch == '[') delimiter = ']';
+    statement.push_back(ch);
+  }
+  return !statement.empty();
+}
+
+bool command_is(std::string_view word, std::string_view lower) {
+  return std::ranges::equal(word, lower, [](char ch, char expected) {
+    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    return ch == expected;
+  });
 }
 
 void escape(std::ostream& out, std::string_view value) {
@@ -75,6 +134,25 @@ void number(std::ostream& out, Number value) {
   out.write(buffer, end - buffer);
 }
 
+void write_cell(std::ostream& out, const mini::Cell& cell, bool json) {
+  std::visit([&](auto value) {
+    using Value = decltype(value);
+    if constexpr (std::is_same_v<Value, std::string_view>) {
+      if (json) mini::wire::quote(out, value);
+      else escape(out, value);
+    } else if constexpr (std::is_same_v<Value, mini::VectorView>) {
+      out.put('[');
+      for (size_t at = 0; at < value.bytes.size(); at += sizeof(float)) {
+        if (at) out.put(',');
+        number(out, mini::load<float>(value.bytes.substr(at, sizeof(float))));
+      }
+      out.put(']');
+    } else {
+      number(out, value);
+    }
+  }, cell);
+}
+
 class TextProtocol : public mini::ResultSink {
  public:
   void ok(uint64_t affected) override {
@@ -93,21 +171,7 @@ class TextProtocol : public mini::ResultSink {
   void row(std::span<const mini::Cell> cells) override {
     for (size_t i = 0; i < cells.size(); ++i) {
       if (i) std::cout.put('\t');
-      std::visit([](auto value) {
-        using Value = decltype(value);
-        if constexpr (std::is_same_v<Value, std::string_view>) {
-          escape(std::cout, value);
-        } else if constexpr (std::is_same_v<Value, mini::VectorView>) {
-          std::cout.put('[');
-          for (size_t at = 0; at < value.bytes.size(); at += sizeof(float)) {
-            if (at) std::cout.put(',');
-            number(std::cout, mini::load<float>(value.bytes.substr(at, sizeof(float))));
-          }
-          std::cout.put(']');
-        } else {
-          number(std::cout, value);
-        }
-      }, cells[i]);
+      write_cell(std::cout, cells[i], false);
     }
     std::cout.put('\n');
   }
@@ -115,28 +179,111 @@ class TextProtocol : public mini::ResultSink {
   void end_rows() override { std::cout << "END\n"; }
 };
 
+class JsonProtocol : public mini::ResultSink {
+ public:
+  explicit JsonProtocol(std::string_view id) : id_(id) {}
+
+  void ok(uint64_t affected) override {
+    success_prefix();
+    std::cout << ",\"affected_rows\":";
+    number(std::cout, affected);
+    std::cout << "}\n";
+  }
+  void shutdown() {
+    success_prefix();
+    std::cout << "}\n";
+  }
+  void error(const mini::SqlError& error) {
+    std::cout << "{\"id\":" << id_ << ",\"ok\":false,\"error\":{\"code\":";
+    mini::wire::quote(std::cout, error.code);
+    std::cout << ",\"message\":";
+    mini::wire::quote(std::cout, error.what());
+    std::cout << "}}\n";
+  }
+  void begin_rows(std::span<const std::string> columns, size_t) override {
+    success_prefix();
+    std::cout << ",\"columns\":[";
+    for (size_t i = 0; i < columns.size(); ++i) {
+      if (i) std::cout.put(',');
+      mini::wire::quote(std::cout, columns[i]);
+    }
+    std::cout << "],\"rows\":[";
+  }
+  void row(std::span<const mini::Cell> cells) override {
+    if (!first_row_) std::cout.put(',');
+    first_row_ = false;
+    std::cout.put('[');
+    for (size_t i = 0; i < cells.size(); ++i) {
+      if (i) std::cout.put(',');
+      write_cell(std::cout, cells[i], true);
+    }
+    std::cout.put(']');
+  }
+  void end_rows() override { std::cout << "]}\n"; }
+
+ private:
+  void success_prefix() const { std::cout << "{\"id\":" << id_ << ",\"ok\":true"; }
+
+  std::string_view id_;
+  bool first_row_ = true;
+};
+
 mini::SearchMode mode_value(std::string_view mode) {
-  if (mode == "exact") return mini::SearchMode::exact;
-  if (mode == "ann") return mini::SearchMode::ann;
+  if (command_is(mode, "exact")) return mini::SearchMode::exact;
+  if (command_is(mode, "ann")) return mini::SearchMode::ann;
   throw mini::SqlError("MODE", "expected exact or ann");
 }
 
-void serve(mini::Database& db, mini::SearchMode mode) {
-  TextProtocol protocol;
-  std::cout << "READY\n" << std::flush;
+void serve_json(mini::Database& db) {
+  std::cout << "{\"type\":\"ready\"}\n" << std::flush;
   std::string line;
   while (!stopping && std::getline(std::cin, line)) {
     if (stopping) break;
-    const auto request = trim(line);
+    std::string_view id = "null";
+    try {
+      const auto request = mini::wire::RequestReader(line).read();
+      id = request.id;
+      JsonProtocol protocol(id);
+      if (request.op == "shutdown") {
+        db.close();
+        protocol.shutdown();
+        std::cout.flush();
+        return;
+      }
+      if (request.op != "execute") throw mini::SqlError("unsupported_op", "expected execute or shutdown");
+      if (!request.sql) mini::wire::invalid("execute needs a sql string");
+      db.execute(mini::parse(*request.sql), mode_value(request.mode), protocol);
+    } catch (const mini::SqlError& error) {
+      JsonProtocol(id).error(error);
+    }
+    std::cout.flush();
+  }
+}
+
+void serve_text(mini::Database& db, mini::SearchMode mode, Input input) {
+  TextProtocol protocol;
+  std::cout << "READY\n" << std::flush;
+  std::string statement;
+  bool first = true;
+  while (!stopping && (input == Input::line ? bool(std::getline(std::cin, statement))
+                                            : read_sql(statement))) {
+    if (stopping) break;
+    auto request = trim(statement);
+    if (first && request.starts_with("\xef\xbb\xbf")) request = trim(request.substr(3));
+    first = false;
     if (request.empty() || request.starts_with("--") || request.starts_with('#')) continue;
-    if (request == "QUIT" || request == "QUIT;") {
+    const auto control = request.ends_with(';') ? trim(request.substr(0, request.size() - 1))
+                                                : request;
+    if (command_is(control, "quit")) {
       db.close();
       std::cout << "BYE\n" << std::flush;
       return;
     }
     try {
-      if (request.starts_with("MODE ")) {
-        mode = mode_value(trim(request.substr(5)));
+      const auto boundary = control.find_first_of(whitespace);
+      if (command_is(control.substr(0, boundary), "mode")) {
+        mode = mode_value(boundary == control.npos ? std::string_view{}
+                                                    : trim(control.substr(boundary)));
         protocol.ok(0);
       } else {
         db.execute(mini::parse(request), mode, protocol);
@@ -149,11 +296,12 @@ void serve(mini::Database& db, mini::SearchMode mode) {
   }
 }
 
-void run(const std::filesystem::path& directory, mini::SearchMode mode) {
+void run(const std::filesystem::path& directory, mini::SearchMode mode, Input input) {
   mini::Database db(directory);
   std::cout.exceptions(std::ios::badbit);
   try {
-    serve(db, mode);
+    if (input == Input::json) serve_json(db);
+    else serve_text(db, mode, input);
   } catch (const std::ios_base::failure&) {
     if (!std::cout.bad()) throw;
   }
@@ -167,18 +315,27 @@ int main(int argc, char** argv) {
   std::cin.tie(nullptr);
   std::filesystem::path directory = "/data";
   mini::SearchMode mode = mini::SearchMode::exact;
+  Input input = Input::json;
   try {
     install_signals();
     for (int i = 1; i < argc; ++i) {
       const std::string_view option = argv[i];
-      if (option == "--data-dir" && i + 1 < argc) directory = argv[++i];
-      else if (option == "--mode" && i + 1 < argc) mode = mode_value(argv[++i]);
+      const auto separator = option.find('=');
+      const auto name = option.substr(0, separator);
+      const std::string_view value = separator != option.npos ? option.substr(separator + 1)
+                                   : i + 1 < argc ? argv[++i] : "";
+      if (name == "--data-dir" && !value.empty()) directory = value;
+      else if (name == "--mode" && !value.empty()) mode = mode_value(value);
+      else if (name == "--input" && value == "json") input = Input::json;
+      else if (name == "--input" && value == "line") input = Input::line;
+      else if (name == "--input" && value == "sql") input = Input::sql;
       else {
-        std::cerr << "Usage: minivectordb [--data-dir DIRECTORY] [--mode exact|ann]\n";
+        std::cerr << "Usage: minivectordb [--data-dir DIRECTORY] [--mode exact|ann] "
+                     "[--input json|line|sql]\n";
         return 2;
       }
     }
-    run(directory, mode);
+    run(directory, mode, input);
   } catch (const std::exception& error) {
     std::cerr << "minivectordb: " << error.what() << '\n';
     return 1;

@@ -5,7 +5,7 @@
   "context": {
     "assignment": "实现单机单客户端的轻量向量数据库。功能准入覆盖 SQL、过滤 TopK、向量索引、持久化、事务和进程崩溃恢复。性能项还约束召回率与资源。",
     "constraints": "参赛者要求本地改动仅放在 extra，远程交付按赛题布局，保护本地信息。评测题面要求源码、Dockerfile 与学习材料来自同一次提交。",
-    "attribution": "参赛者的原始任务、复测要求和范围澄清保留在 U01–U08。实现选择、实验设计、实验执行及解释由 Agent 完成，工具输出单独标记。选手自己的技术分析、独立验证或结果解释尚未纳入这份材料。"
+    "attribution": "参赛者的原始任务、复测要求和范围澄清保留在 U01–U09。实现选择、实验设计、实验执行及解释由 Agent 完成，工具输出单独标记。选手自己的技术分析、独立验证或结果解释尚未纳入这份材料。"
   },
   "conversations": [
     {
@@ -92,6 +92,11 @@
       "id": "U08",
       "role": "user",
       "content": "你可以自己随意创建测试，不要让官方用例回退即可。"
+    },
+    {
+      "id": "U09",
+      "role": "user",
+      "content": "提测平台没有失败详情，要你自己改进。你可以自己建立测试，全方位一些多一些。同时要保证官方用例不回退。"
     }
   ],
   "experiments": [
@@ -326,6 +331,63 @@
       "output": "Official public samples: 5 cases, 32 statements passed\nOfficial public samples: 20 cases, 95 statements passed\n12,000 rows × 512 dimensions, 43,108,037-byte log, 18,874,368-byte address limit\n108 exact/ann queries matched independent integer-distance rankings",
       "result_source": "实际 OCI 镜像的启动检查、两版公开回归及高维自建数据运行输出",
       "interpretation": "两版公开输入按各自清单全部执行通过。自建高维数据覆盖过滤、空集、K 大于命中数、事务内更新与回滚和强杀重启。正式评测驱动及保留用例仍需由平台验证。"
+    },
+    {
+      "id": "E25",
+      "actor": "agent",
+      "topic": "大量窄行的主键目录和未提交尾部恢复",
+      "method": "用 3deff7ab17ab034d1db55f74cf5bfbc86a253e20 按固定乱序写入 600,000 条含标签和二维向量的记录。两版读取同一份日志，比较启动时的 VmPeak 和 VmHWM，并在 26 MiB 地址空间上限下查询。另在事务中修改和删除已提交记录、建表插入 400,000 行后强杀，以 9 MiB 限制恢复并核对截断位置。检查原程序能读取新版提交过更新、删除和插入的日志。",
+      "baseline_output": "Dense restart at 26 MiB failed: std::bad_alloc\nCrash recovery at 9 MiB failed: std::bad_alloc\nVmPeak 40,624 KiB, peak RSS 39,520 KiB during startup",
+      "output": "Dense restart at 26 MiB passed\nCrash recovery at 9 MiB passed; tail truncated\nVmPeak 24,000 KiB, peak RSS 22,720 KiB during startup\nPrevious version reopened the revised log with three committed mutations intact",
+      "result_source": "同一份旧日志的 Linux 进程对照和双向读写检查",
+      "interpretation": "将多个行位置装入连续的有序分组，降低每条主键的内存开销。恢复等到完整提交帧才应用事务变更，大量未提交插入无需进入行目录。地址空间和进程 RSS 是本地口径，平台资源门限另行测量。"
+    },
+    {
+      "id": "E26",
+      "actor": "agent",
+      "topic": "题面多行 SQL 和 stdin 分帧",
+      "method": "直接运行题面 §2.2 的多行建表。另保持 stdin 打开，只发送带分号的语句并检查是否在无换行时收到响应。用等号形式传入数据目录和检索模式，检查启动。修订版复测字符串内分号、重复单引号转义、注释、UTF-8 BOM、同一批输入的连续命令和半条语句时收到终止信号。",
+      "baseline_output": "Official example multiline DDL: ERROR SYNTAX expected identifier\nEquals-form options startup: 2\nSemicolon sent without newline: no response",
+      "output": "Script delimiters, quoting, comments, equals-form options, and line-mode restart: passed\nOfficial multiline SQL example passed in semicolon mode, including rollback",
+      "result_source": "失败版本的进程对照和新版镜像的标准输入输出检查",
+      "interpretation": "显式分号模式可用于本地 SQL 脚本。此轮试验使用文本交互，后续正式接口对接见 E29。"
+    },
+    {
+      "id": "E27",
+      "actor": "agent",
+      "topic": "分组目录的随机状态对照和恢复中断",
+      "method": "每个固定种子建两张表，各以 4,002 条记录起步。用 Python 字典独立维护行状态和提交边界，核对范围更新、删除、倒序、exact 与 ann，以及强杀后的完整可见集合。对测试程序在日志头部分写入、提交帧部分写入、完整落盘未回复、恢复截断前和截断后强杀。公开及核心回归另用 ASan、UBSan 和标准库迭代器调试构建运行。",
+      "output": "Paged directory differential model: 1,920 steps passed\nSIGKILL restarts: 79\nFive actual SIGKILL points passed: log initialization, partial commit, durable commit before reply, before recovery truncate and after recovery truncate",
+      "result_source": "独立状态模型、实际文件调用故障注入与检查工具运行输出",
+      "interpretation": "分裂、合并、跨表回滚、部分提交和重复恢复都保留了预期可见性。恢复后验证了继续写入并再次重启。"
+    },
+    {
+      "id": "E28",
+      "actor": "agent",
+      "topic": "接入 JSONL 前的镜像、PID 1 与 SQL 回归",
+      "method": "按仓库 Dockerfile 构建 linux/amd64 OCI 镜像，核对入口及 /data 配置。在独立 PID 和网络命名空间中启动镜像里的程序，确认它作为 PID 1 运行，分别发送 SIGTERM 和 SIGKILL，再用相同数据目录重启。以同一镜像二进制执行新版、早期公开题包及大数据恢复回归。",
+      "output": "Offline OCI process as PID 1 passed SIGTERM rollback, SIGKILL restart and ACK durability\nOfficial public samples: 20 cases, 95 statements passed\nOfficial public samples: 5 cases, 32 statements passed\n600,000 narrow rows recovered from 28,819,383 bytes with a 27,262,976-byte address limit\nDiscarded 15,991,783 uncommitted bytes twice checked with a 9,437,184-byte address limit",
+      "result_source": "OCI 镜像、隔离进程及两版公开断言的运行输出",
+      "interpretation": "协议对接前的候选镜像完成了启动、退出、复用数据目录和两版 SQL 断言回归。"
+    },
+    {
+      "id": "E29",
+      "actor": "agent",
+      "topic": "用官方工具复现握手错误并对接 JSONL",
+      "method": "官方提交 f4d4e26653af823a7601668802f80e374ad6643c 发布了标准输入输出协议与 protocol_check。用原版检查器和 3deff7ab17ab034d1db55f74cf5bfbc86a253e20 的源码编译产物运行 handshake-only。修订版默认按 JSONL 接收 execute 和 shutdown，准备完成后主动发送 ready，并保持请求 ID 和结果的数据类型。再以同一检查器跑握手和公开用例。",
+      "baseline_output": "handshake: FAIL invalid JSON response; stdout line (first 240 bytes)=b'READY'",
+      "output": "handshake: PASS\nAll 20 public cases passed with the official JSONL checker",
+      "result_source": "官方 protocol_check 的未修改程序与本地两版实际进程的结果",
+      "interpretation": "旧版在第一条 stdout 上已与官方协议不兼容。JSONL 接入同时修复了启动、execute 请求、结果序列化、错误回传和正常关闭。"
+    },
+    {
+      "id": "E30",
+      "actor": "agent",
+      "topic": "最终镜像的官方协议回归、JSON 边界和强杀",
+      "method": "从根 Dockerfile 重建 linux/amd64 OCI 镜像。用官方检查器的 command 模式运行镜像的默认入口，进程为 PID 1，网络隔离，根目录只读，数据目录独立挂载，进程去除 capabilities。在同一入口执行现版和早期公开用例。早期清单仅补充路径，SQL 和预期结果文件原样使用。另用官方 JSONL 传输对象执行六次未提交强杀和一次确认提交后强杀；ASan、UBSan 和标准库调试构建运行随机 ID、UTF-8、控制字符和损坏输入对照。",
+      "output": "Official checker: handshake, 20 current public cases and 5 earlier public cases passed\nOfficial JSONL transport: PID 1, read-only root, writable /data, no capabilities, seven forced restarts and commit persistence passed\n1,024 randomized JSONL typed round trips and 11 malformed inputs checked",
+      "result_source": "官方检查器对真实镜像程序的输出、强杀后的查询和检查工具输出",
+      "interpretation": "验证覆盖了官方公开握手和 SQL 数据类型，也复验了低内存与恢复路径。未运行平台正式提测，保留用例仍由平台检查。"
     }
   ],
   "agent_retrospective": [

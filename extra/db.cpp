@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <new>
 #include <numeric>
@@ -25,7 +26,145 @@ struct RowRef {
   uint64_t offset;
   uint32_t length;
 };
-using Rows = std::map<int64_t, RowRef>;
+// One tree node covers a sorted page of row locations. Page boundaries stay
+// valid when the first key is removed, so only splits and merges edit the tree.
+class Rows {
+ public:
+  using value_type = std::pair<int64_t, RowRef>;
+
+ private:
+  static constexpr size_t page_size = 128;
+  using Page = std::vector<value_type>;
+  using Pages = std::map<int64_t, Page>;
+
+ public:
+  class const_iterator {
+   public:
+    using iterator_category = std::bidirectional_iterator_tag;
+    using value_type = Rows::value_type;
+    using difference_type = std::ptrdiff_t;
+    using pointer = const value_type*;
+    using reference = const value_type&;
+
+    const_iterator() = default;
+    reference operator*() const { return page_->second[position_]; }
+    pointer operator->() const { return &**this; }
+
+    const_iterator& operator++() {
+      if (++position_ == page_->second.size()) {
+        ++page_;
+        position_ = 0;
+      }
+      return *this;
+    }
+    const_iterator operator++(int) {
+      auto copy = *this;
+      ++*this;
+      return copy;
+    }
+    const_iterator& operator--() {
+      if (position_ == 0) position_ = (--page_)->second.size();
+      --position_;
+      return *this;
+    }
+    const_iterator operator--(int) {
+      auto copy = *this;
+      --*this;
+      return copy;
+    }
+    bool operator==(const const_iterator&) const = default;
+
+   private:
+    friend class Rows;
+    const_iterator(Pages::const_iterator page, size_t position)
+        : page_(page), position_(position) {}
+    Pages::const_iterator page_;
+    size_t position_ = 0;
+  };
+
+  size_t size() const { return size_; }
+  const_iterator begin() const { return size_ == 0 ? end() : const_iterator(pages_.begin(), 0); }
+  const_iterator end() const { return {pages_.end(), 0}; }
+  const_iterator lower_bound(int64_t key) const {
+    if (size_ == 0) return end();
+    auto page = std::prev(pages_.upper_bound(key));
+    const size_t at = position(page->second, key);
+    if (at == page->second.size()) return {std::next(page), 0};
+    return {page, at};
+  }
+  const_iterator upper_bound(int64_t key) const {
+    auto entry = lower_bound(key);
+    if (entry != end() && entry->first == key) ++entry;
+    return entry;
+  }
+  bool contains(int64_t key) const {
+    const auto entry = lower_bound(key);
+    return entry != end() && entry->first == key;
+  }
+
+  void insert_or_assign(int64_t key, RowRef row) {
+    if (pages_.empty()) add_page(std::numeric_limits<int64_t>::min());
+    auto page = std::prev(pages_.upper_bound(key));
+    size_t at = position(page->second, key);
+    if (at < page->second.size() && page->second[at].first == key) {
+      page->second[at].second = row;
+      return;
+    }
+    if (page->second.size() == page_size) {
+      if (at == page_size && std::next(page) == pages_.end()) {
+        page = add_page(key);
+        at = 0;
+      } else {
+        const size_t middle = page_size / 2;
+        auto& entries = page->second;
+        auto right = add_page(entries[middle].first);
+        right->second.insert(right->second.end(), entries.begin() + middle, entries.end());
+        entries.resize(middle);
+        if (at > middle) {
+          page = right;
+          at -= middle;
+        }
+      }
+    }
+    page->second.insert(page->second.begin() + at, {key, row});
+    ++size_;
+  }
+
+  void erase(int64_t key) {
+    if (size_ == 0) return;
+    auto page = std::prev(pages_.upper_bound(key));
+    auto& entries = page->second;
+    const size_t at = position(entries, key);
+    if (at == entries.size() || entries[at].first != key) return;
+    entries.erase(entries.begin() + at);
+    --size_;
+    if (entries.size() >= page_size / 4) return;
+    const auto right = std::next(page);
+    if (right != pages_.end() && entries.size() + right->second.size() <= page_size) {
+      merge(page, right);
+    } else if (page != pages_.begin()) {
+      const auto left = std::prev(page);
+      if (left->second.size() + entries.size() <= page_size) merge(left, page);
+    }
+  }
+
+ private:
+  static size_t position(const Page& page, int64_t key) {
+    return std::ranges::lower_bound(page, key, {}, &value_type::first) - page.begin();
+  }
+  Pages::iterator add_page(int64_t boundary) {
+    Page entries;
+    entries.reserve(page_size);
+    return pages_.emplace(boundary, std::move(entries)).first;
+  }
+  void merge(Pages::iterator left, Pages::iterator right) {
+    left->second.insert(left->second.end(), right->second.begin(), right->second.end());
+    pages_.erase(right);
+  }
+
+  Pages pages_;
+  size_t size_ = 0;
+};
 
 struct ProjectionEntry {
   float pivot;
@@ -423,15 +562,31 @@ Table& Database::table(std::string_view name) {
 void Database::recover() {
   uint64_t committed = Log::start;
   uint64_t cursor = committed;
-  while (const auto frame = log_.frame_at(cursor, log_.end())) {
+  std::array<Frame, 128> staged;
+  size_t staged_count = 0;
+  const uint64_t limit = log_.end();
+  while (const auto frame = log_.frame_at(cursor, limit)) {
     cursor = frame->end();
-    if (frame->op == Op::commit) {
-      committed = cursor;
-    } else {
-      apply(*frame);
+    if (frame->op != Op::commit) {
+      if (staged_count < staged.size()) staged[staged_count++] = *frame;
+      continue;
     }
+    // Keep small transactions in the frame buffer. For a large committed
+    // transaction, reread its remaining frames after finding the commit.
+    uint64_t replay = committed;
+    for (const auto& change : std::span(staged).first(staged_count)) {
+      apply(change);
+      replay = change.end();
+    }
+    while (replay < frame->offset) {
+      const auto change = log_.frame_at(replay, frame->offset);
+      if (!change) throw std::runtime_error("invalid committed frame");
+      apply(*change);
+      replay = change->end();
+    }
+    committed = cursor;
+    staged_count = 0;
   }
-  undo(committed, cursor);
   log_.discard_after(committed);
   for (auto& current : tables_) {
     if (!current->index_name.empty()) build_index(*current);
@@ -645,17 +800,22 @@ uint64_t Database::write(const Delete& statement) {
   const KeyRange range = restrict_keys(current, filters);
   invalidate_index(current);
   log_.prepare_reads();
-  const auto [first, last] = range.iterators(current.rows);
   uint64_t affected = 0;
   std::vector<Cell> cells(current.columns.size());
-  for (auto row = first; row != last;) {
-    const auto deleting = row++;
+  auto row = current.rows.lower_bound(range.low);
+  while (row != current.rows.end() && range.contains(row->first)) {
+    const auto [key, location] = *row;
     if (!filters.empty()) {
-      decode(current, deleting->first, payload(log_, deleting->second), cells);
-      if (!matches(filters, cells)) continue;
+      decode(current, key, payload(log_, location), cells);
+      if (!matches(filters, cells)) {
+        ++row;
+        continue;
+      }
     }
-    apply(log_.append(Op::erase, current.id, deleting->first, deleting->second.offset));
+    apply(log_.append(Op::erase, current.id, key, location.offset));
     ++affected;
+    // Erasing can shift entries or merge pages, so resume by key.
+    row = current.rows.upper_bound(key);
   }
   return affected;
 }

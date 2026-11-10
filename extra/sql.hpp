@@ -70,6 +70,7 @@ enum class Transaction { begin, commit, rollback };
 using Statement = std::variant<CreateTable, CreateIndex, Insert, Select, Update, Delete, Transaction>;
 
 Statement parse(std::string_view sql);
+size_t utf8_length(std::string_view value);
 int64_t bigint(const Literal& value);
 std::string_view varchar(const Literal& value, uint32_t max_chars);
 std::vector<float> vector_value(const Literal& value, uint32_t dimension);

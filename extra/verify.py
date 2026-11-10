@@ -10,6 +10,7 @@ from pathlib import Path
 import random
 import re
 import resource
+import select
 import shutil
 import signal
 import subprocess
@@ -19,12 +20,13 @@ from time import perf_counter, sleep
 
 
 class Session:
-    def __init__(self, binary, directory, address_space=None):
+    def __init__(self, binary, directory, address_space=None, *, arguments=None, ready="READY"):
         def limit_memory():
             resource.setrlimit(resource.RLIMIT_AS, (address_space, address_space))
 
         self.process = subprocess.Popen(
-            [str(binary), "--data-dir", str(directory)],
+            [str(binary), *(arguments if arguments is not None
+                            else ("--data-dir", str(directory), "--input=line"))],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
@@ -32,7 +34,7 @@ class Session:
             preexec_fn=limit_memory if address_space else None,
         )
         try:
-            assert self.read() == "READY"
+            assert self.read() == ready
         except BaseException:
             self.__exit__()
             raise
@@ -270,6 +272,140 @@ def functional(binary, root):
     print("SQL, Unicode, float32, filtered TopK, transaction visibility and normal restart: passed")
 
 
+def json_wire(binary, root):
+    arguments = ("--data-dir", str(root))
+    ready = '{"type":"ready"}'
+
+    def request(db, ident, sql=None, *, op="execute", mode=None):
+        message = {"id": ident, "op": op}
+        if sql is not None:
+            message["sql"] = sql
+        if mode is not None:
+            message["search_mode"] = mode
+        response = json.loads(db.send(json.dumps(message, allow_nan=False)))
+        assert type(response["id"]) is type(ident) and response["id"] == ident, response
+        assert type(response["ok"]) is bool, response
+        return response
+
+    def shutdown(db, ident):
+        assert request(db, ident, op="shutdown") == {"id": ident, "ok": True}
+        assert db.process.wait(timeout=5) == 0
+        assert db.process.stdout.read() == ""
+
+    text = '甲🦊; "quote" \'single\' \\tab\tline\nreturn\rNUL\0'
+    literal = "'" + text.replace("\\", "\\\\").replace("'", "''") + "'"
+    largest = 2**63 - 1
+    with Session(binary, root, arguments=arguments, ready=ready) as db:
+        assert request(db, 2**100, "CREATE TABLE docs (\n  id BIGINT PRIMARY KEY,\n"
+                       "  body VARCHAR(64),\n  v VECTOR(2)\n);")["ok"]
+        write = request(db, "写入🦊", f"INSERT INTO docs VALUES ({largest},{literal},'[1.25,0]')")
+        assert write == {"id": "写入🦊", "ok": True, "affected_rows": 1}
+        assert type(write["affected_rows"]) is int
+        ident = {"name": "\t#行", "values": [1, False, None, {"value": 2**103}]}
+        found = request(db, ident, "SELECT id,body,v FROM docs ORDER BY id;", mode="exact")
+        assert found == {"id": ident, "ok": True, "columns": ["id", "body", "v"],
+                         "rows": [[largest, text, [1.25, 0]]]}
+        assert type(found["rows"][0][0]) is int
+        assert request(db, False, "SELECT id FROM docs WHERE id<0", mode="ann")["rows"] == []
+        assert request(db, None, "INSERT INTO docs VALUES "
+                       f"({largest},'duplicate','[1,0]')")["error"]["code"] == "duplicate_key"
+        for malformed in ('{"id":1,"id":2,"op":"shutdown"}',
+                          '{"id":NaN,"op":"shutdown"}',
+                          r'{"id":"\ud800","op":"shutdown"}'):
+            response = json.loads(db.send(malformed))
+            assert response["ok"] is False and response["error"]["code"] == "invalid_request"
+        assert request(db, 1.25, op="other")["ok"] is False
+        assert request(db, 1, "BEGIN")["ok"]
+        assert request(db, 2, "DELETE FROM docs")["affected_rows"] == 1
+        shutdown(db, "结束")
+    with Session(binary, root, arguments=arguments, ready=ready) as db:
+        assert request(db, 0, "SELECT body FROM docs")["rows"] == [[text]]
+        shutdown(db, ["done", 7])
+    print("Default JSONL: typed IDs and values, multiline SQL, Unicode, errors and shutdown passed")
+
+
+def script_input(binary, root):
+    arguments = (f"--data-dir={root}", "--mode=ann", "--input=sql")
+    with Session(binary, root, arguments=arguments) as db:
+        # Keep the input open and send no line ending after the semicolon.
+        db.process.stdin.write(
+            "\ufeff-- initial comment with ;\r\nCREATE TABLE docs (\r\n"
+            "  id BIGINT PRIMARY KEY,\r\n  text VARCHAR(30),\r\n  v VECTOR(2)\r\n);")
+        db.process.stdin.flush()
+        assert select.select([db.process.stdout], [], [], 5)[0], "missing response to semicolon"
+        assert db.read() == "OK 0"
+        db.process.stdin.write(
+            "INSERT INTO docs VALUES\n"
+            " (1,'a;it''s # text',[3,4]), /* ignore ; */ (2,'甲;乙',[0,0]);"
+            "SELECT id,text FROM docs\n ORDER BY id DESC;")
+        db.process.stdin.flush()
+        assert db.read() == "OK 2"
+        assert db.read_result(db.read()) == (
+            ["id", "text"], [["2", "甲;乙"], ["1", "a;it's # text"]])
+        db.ok("mode\texact;")
+        db.error("INSERT INTO docs VALUES (3,'bad',[0;0]);", "VALUE")
+        db.ok("BEGIN;")
+        db.ok("DELETE FROM docs WHERE id=2;", 1)
+        db.process.stdin.write("DELETE FROM docs WHERE id=1")
+        db.process.stdin.flush()
+        db.process.terminate()
+        assert db.process.wait(timeout=5) == 0
+    with Session(binary, root) as db:
+        assert db.query("\ufeffSELECT id FROM docs ORDER BY id") == [["1"], ["2"]]
+        db.quit()
+    with Session(binary, root, arguments=arguments) as db:
+        db.process.stdin.write("INSERT INTO docs VALUES (4,'unfinished")
+        db.process.stdin.close()
+        assert db.read().startswith("ERROR SYNTAX ")
+        assert db.process.wait(timeout=5) == 0
+    print("Script delimiters, quoting, comments, equals-form options, and line-mode restart: passed")
+
+
+def paged_mutations(binary, root):
+    keys = [-(2**63), 2**63 - 1] + [key * 4099 for key in range(-2600, 2600)]
+    random.Random(1271).shuffle(keys)
+    expected = {key: key % 13 for key in keys}
+
+    def check(db, state):
+        assert db.query("SELECT id,tag FROM t ORDER BY id DESC") == [
+            [str(key), str(state[key])] for key in sorted(state, reverse=True)]
+
+    with Session(binary, root) as db:
+        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, tag BIGINT)")
+        for start in range(0, len(keys), 311):
+            chunk = keys[start:start+311]
+            rows = ",".join(f"({key},{expected[key]})" for key in chunk)
+            db.ok("INSERT INTO t VALUES " + rows, len(chunk))
+        check(db, expected)
+        changed = [key for key, tag in expected.items() if -100_000 <= key <= 200_000 and tag < 8]
+        db.ok("UPDATE t SET tag=99 WHERE id>=-100000 AND tag<8 AND id<=200000", len(changed))
+        expected.update((key, 99) for key in changed)
+        erased = [key for key, tag in expected.items() if key < -200_000 and tag <= 9]
+        db.ok("DELETE FROM t WHERE id < -200000 AND tag <= 9", len(erased))
+        for key in erased:
+            del expected[key]
+        check(db, expected)
+        db.ok("BEGIN")
+        db.ok("DELETE FROM t", len(expected))
+        assert db.query("SELECT * FROM t ORDER BY id DESC") == []
+        db.ok("INSERT INTO t VALUES (-9223372036854775808,1),(9223372036854775807,2)", 2)
+        rows = ",".join(f"({key},0)" for key in range(1, 600))
+        db.error(f"INSERT INTO t VALUES {rows},(9223372036854775807,3)", "duplicate_key")
+        check(db, {-(2**63): 1, 2**63 - 1: 2})
+        db.ok("ROLLBACK")
+        check(db, expected)
+        db.kill()
+    with Session(binary, root) as db:
+        check(db, expected)
+        db.ok("DELETE FROM t", len(expected))
+        db.ok("INSERT INTO t VALUES (-9223372036854775808,7),(9223372036854775807,8)", 2)
+        db.quit()
+    with Session(binary, root) as db:
+        check(db, {-(2**63): 7, 2**63 - 1: 8})
+        db.quit()
+    print("5,202 shuffled keys: page splits, filtered range edits, merges, and restart passed")
+
+
 def atomicity(binary, root):
     with Session(binary, root) as db:
         db.ok("CREATE TABLE docs (id BIGINT PRIMARY KEY, body VARCHAR(4096))")
@@ -441,6 +577,59 @@ def indexed_memory(binary, root):
     print(f"100,000 indexed rows recovered and queried with {limit:,}-byte address limit")
 
 
+def dense_recovery(binary, root):
+    size = 600_000
+    limit = 26 * 1024**2
+    keys = list(range(-size // 2, size // 2))
+    random.Random(317).shuffle(keys)
+    with Session(binary, root) as db:
+        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, tag BIGINT, v VECTOR(2))")
+        for start in range(0, size, 1000):
+            rows = ",".join(f"({key},{key % 7},'[{key % 23},0]')" for key in keys[start:start+1000])
+            db.ok("INSERT INTO t VALUES " + rows, 1000)
+        db.ok("CREATE VECTOR INDEX ix ON t(v)")
+        db.quit()
+    log_size = (root / "minivectordb.log").stat().st_size
+    assert log_size > limit
+    with Session(binary, root, limit) as db:
+        assert db.query("SELECT id FROM t WHERE id >= 299996 ORDER BY id DESC") == [
+            [str(key)] for key in range(299999, 299995, -1)]
+        assert db.query("SELECT tag FROM t WHERE id=-300000") == [["6"]]
+        sql = ("SELECT id FROM t WHERE id>=0 AND id<10 AND tag=0 "
+               "ORDER BY L2_DISTANCE(v,'[6,0]') LIMIT 9")
+        assert db.query(sql) == [["7"], ["0"]]
+        db.ok("MODE ann")
+        assert db.query(sql) == [["7"], ["0"]]
+        db.quit()
+    print(f"{size:,} narrow rows recovered from {log_size:,} bytes with a {limit:,}-byte address limit")
+
+
+def discarded_tail(binary, root):
+    limit = 9 * 1024**2
+    log = root / "minivectordb.log"
+    with Session(binary, root) as db:
+        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, tag BIGINT)")
+        db.ok("INSERT INTO t VALUES (1,7),(2,8)", 2)
+        committed = log.stat().st_size
+        db.ok("BEGIN")
+        db.ok("UPDATE t SET tag=99 WHERE id=1", 1)
+        db.ok("DELETE FROM t WHERE id=2", 1)
+        db.ok("CREATE TABLE staged (id BIGINT PRIMARY KEY, tag BIGINT)")
+        for start in range(0, 400_000, 2000):
+            rows = ",".join(f"({key},-1)" for key in range(start, start+2000))
+            db.ok("INSERT INTO staged VALUES " + rows, 2000)
+        db.kill()
+    tail = log.stat().st_size - committed
+    assert tail > limit
+    for _ in range(2):
+        with Session(binary, root, limit) as db:
+            assert db.query("SELECT id,tag FROM t ORDER BY id") == [["1", "7"], ["2", "8"]]
+            db.error("SELECT id FROM staged", "UNKNOWN_TABLE")
+            assert log.stat().st_size == committed
+            db.quit()
+    print(f"Discarded {tail:,} uncommitted bytes twice checked with a {limit:,}-byte address limit")
+
+
 def indexed_ties(binary, root):
     wide_order = "SELECT id FROM precise ORDER BY L2_DISTANCE(v,'[0,0,0,0]')"
     wide_top = wide_order + " LIMIT 3"
@@ -542,19 +731,26 @@ def main():
     parser.add_argument("binary", type=Path)
     parser.add_argument("--public-suite", type=Path, help="path to the official mysqltest directory")
     parser.add_argument("--benchmark", action="store_true")
+    parser.add_argument("--stress", action="store_true", help="also run the large recovery checks")
     options = parser.parse_args()
     binary = options.binary.resolve(strict=True)
     with TemporaryDirectory(prefix=".verify-", dir=Path(__file__).resolve().parent) as name:
         root = Path(name)
         if options.public_suite is not None:
             public_cases(binary, root / "public", options.public_suite)
+        json_wire(binary, root / "json")
         functional(binary, root / "sql")
+        script_input(binary, root / "framing")
+        paged_mutations(binary, root / "directory")
         atomicity(binary, root / "atomic")
         shutdown_backpressure(binary, root / "backpressure")
         partial_log(binary, root / "partial")
         indexed_ties(binary, root / "index")
         bounded_memory(binary, root / "large")
         indexed_memory(binary, root / "index-memory")
+        if options.stress:
+            dense_recovery(binary, root / "dense")
+            discarded_tail(binary, root / "tail")
         if options.benchmark:
             benchmark(binary, root / "bench")
 

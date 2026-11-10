@@ -385,7 +385,9 @@ class Parser {
   Token token_;
 };
 
-size_t unicode_length(std::string_view value) {
+}  // namespace
+
+size_t utf8_length(std::string_view value) {
   size_t characters = 0;
   for (size_t i = 0; i < value.size(); ++characters) {
     const auto first = static_cast<unsigned char>(value[i++]);
@@ -416,8 +418,6 @@ size_t unicode_length(std::string_view value) {
   return characters;
 }
 
-}  // namespace
-
 Statement parse(std::string_view sql) { return Parser(sql).parse(); }
 
 int64_t bigint(const Literal& value) {
@@ -430,7 +430,7 @@ int64_t bigint(const Literal& value) {
 
 std::string_view varchar(const Literal& value, uint32_t max_chars) {
   if (value.kind != LiteralKind::string) throw SqlError("VALUE", "expected a string");
-  if (unicode_length(value.text) > max_chars) throw SqlError("VALUE", "VARCHAR is too long");
+  if (utf8_length(value.text) > max_chars) throw SqlError("VALUE", "VARCHAR is too long");
   return value.text;
 }
 

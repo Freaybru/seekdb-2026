@@ -9,3 +9,4 @@ extra/*
 !extra/log.cpp
 !extra/db.cpp
 !extra/main.cpp
+!extra/wire.hpp
