@@ -140,7 +140,7 @@ std::vector<Filter> bind_filters(const Table& table, const std::vector<Predicate
         value = varchar(predicate.value, std::numeric_limits<uint32_t>::max());
         break;
       case Type::vector:
-        throw SqlError("UNSUPPORTED", "vector comparison requires L2_DISTANCE");
+        throw SqlError("unsupported_sql", "vector comparison requires L2_DISTANCE");
     }
     filters.push_back({column, predicate.comparison, value});
   }
@@ -537,7 +537,7 @@ uint64_t Database::write(const Insert& statement) {
   for (const auto& row : statement.rows) {
     if (row.size() != column_count) throw SqlError("VALUE", "incorrect number of values");
     const int64_t key = bigint(row[positions[current.primary]]);
-    if (current.rows.contains(key)) throw SqlError("DUPLICATE_KEY", "primary key already exists");
+    if (current.rows.contains(key)) throw SqlError("duplicate_key", "primary key already exists");
     bytes.clear();
     for (size_t column : current.layout) {
       encode(bytes, current.columns[column], row[positions[column]]);
@@ -554,7 +554,7 @@ uint64_t Database::write(const Update& statement) {
   std::vector<std::optional<std::string>> replacements(current.columns.size());
   for (const auto& [name, value] : statement.assignments) {
     const size_t column = current.column(name);
-    if (column == current.primary) throw SqlError("UNSUPPORTED", "cannot update primary key");
+    if (column == current.primary) throw SqlError("unsupported_sql", "cannot update primary key");
     if (replacements[column]) throw SqlError("SCHEMA", "duplicate SET column");
     encode(replacements[column].emplace(), current.columns[column], value);
   }
@@ -747,7 +747,7 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
     const BoundExpression bound = alias == statement.projections.end()
         ? bind(expression) : projections[alias - statement.projections.begin()];
     if (bound.query == missing && bound.column == current.vector) {
-      throw SqlError("UNSUPPORTED", "cannot order by a vector value");
+      throw SqlError("unsupported_sql", "cannot order by a vector value");
     }
     order.push_back({bound, ordering.descending});
   }

@@ -251,7 +251,7 @@ class Parser {
     } else if (accept("rollback")) {
       return Transaction::rollback;
     }
-    throw SqlError("UNSUPPORTED", "unsupported SQL statement");
+    throw SqlError("unsupported_sql", "unsupported SQL statement");
   }
 
   CreateTable create_table() {
@@ -274,7 +274,7 @@ class Parser {
         } else if (accept("vector")) {
           column.type = Type::vector;
         } else {
-          throw SqlError("UNSUPPORTED", "unsupported column type");
+          throw SqlError("unsupported_sql", "unsupported column type");
         }
         expect("(");
         const uint64_t length = nonnegative();
@@ -448,34 +448,36 @@ std::vector<float> vector_value(const Literal& value, uint32_t dimension) {
   }
   std::vector<float> result;
   result.reserve(std::min<size_t>(dimension, text.size() / 2));
-  do {
-    while (pos < text.size() && space(text[pos])) ++pos;
-    if (result.size() == dimension) throw SqlError("VALUE", "wrong vector dimension");
-    const size_t end = number_end(text, pos);
-    if (end == pos) throw SqlError("VALUE", "invalid vector component");
-    // from_chars handles the usual path. strtof also accepts underflow to
-    // finite zero and rounds values on the float32 subnormal boundary.
-    float component = 0;
-    const char* first = text.data() + pos;
-    const char* last = text.data() + end;
-    if (*first == '+') ++first;
-    const auto converted = std::from_chars(first, last, component);
-    if (converted.ec == std::errc::result_out_of_range) {
-      char* tail = nullptr;
-      component = std::strtof(text.data() + pos, &tail);
-      if (tail != last) throw SqlError("VALUE", "invalid vector component");
-    } else if (converted.ec != std::errc{} || converted.ptr != last) {
-      throw SqlError("VALUE", "invalid vector component");
-    }
-    if (!std::isfinite(component)) throw SqlError("VALUE", "nonfinite float32 component");
-    result.push_back(component);
-    pos = end;
-  } while (consume(','));
-  if (!consume(']')) throw SqlError("VALUE", "invalid vector syntax");
-  while (pos < text.size() && space(text[pos])) ++pos;
-  if (pos != text.size() || result.size() != dimension) {
-    throw SqlError("VALUE", "wrong vector dimension");
+  size_t count = 0;
+  if (!consume(']')) {
+    do {
+      while (pos < text.size() && space(text[pos])) ++pos;
+      const size_t end = number_end(text, pos);
+      if (end == pos) throw SqlError("VALUE", "invalid vector component");
+      // strtof handles rounding at the float32 subnormal boundary, including
+      // finite zero, when from_chars reports an out-of-range value.
+      float component = 0;
+      const char* first = text.data() + pos;
+      const char* last = text.data() + end;
+      if (*first == '+') ++first;
+      const auto converted = std::from_chars(first, last, component);
+      if (converted.ec == std::errc::result_out_of_range) {
+        char* tail = nullptr;
+        component = std::strtof(text.data() + pos, &tail);
+        if (tail != last) throw SqlError("VALUE", "invalid vector component");
+      } else if (converted.ec != std::errc{} || converted.ptr != last) {
+        throw SqlError("VALUE", "invalid vector component");
+      }
+      if (!std::isfinite(component)) throw SqlError("VALUE", "nonfinite float32 component");
+      if (count < dimension) result.push_back(component);
+      ++count;
+      pos = end;
+    } while (consume(','));
+    if (!consume(']')) throw SqlError("VALUE", "invalid vector syntax");
   }
+  while (pos < text.size() && space(text[pos])) ++pos;
+  if (pos != text.size()) throw SqlError("VALUE", "invalid vector syntax");
+  if (count != dimension) throw SqlError("dimension_mismatch", "wrong vector dimension");
   return result;
 }
 

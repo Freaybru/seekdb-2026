@@ -42,7 +42,7 @@ SQL
 
 `main.cpp` 中的文本协议用于本地验证。每行发送一条完整 SQL，可带分号。启动后收到 `READY`。成功写入返回 `OK <影响行数>`，错误返回 `ERROR <代码> <消息>`。查询返回 `RESULT <列数> <行数>`、一行列名、指定数量的数据行及 `END`。列以制表符分隔，字符串转义反斜杠、制表符、换行、回车和 NUL。每个响应立即刷新。`MODE exact` 或 `MODE ann` 切换模式，默认 exact。`QUIT` 关闭并返回 `BYE`，EOF、`SIGTERM` 或 `SIGINT` 同样结束会话。正常关闭撤销未提交事务。
 
-错误代码覆盖语法（`SYNTAX`）、不支持的语句（`UNSUPPORTED`）、表结构（`SCHEMA`）、值或维度（`VALUE`）、主键重复（`DUPLICATE_KEY`）、表或列不存在（`UNKNOWN_TABLE`、`UNKNOWN_COLUMN`）、重名（`TABLE_EXISTS`、`INDEX_EXISTS`）和事务状态（`TRANSACTION`）。存储故障时进程停止，诊断写到 stderr，由下次启动按日志恢复。
+重复主键、不支持的 SQL 和合法向量字面量的维度不符分别返回公开题包使用的 `duplicate_key`、`unsupported_sql`、`dimension_mismatch`。格式错误、非有限值和 float32 溢出仍返回 `VALUE`。其他错误代码覆盖语法（`SYNTAX`）、表结构（`SCHEMA`）、表或列不存在（`UNKNOWN_TABLE`、`UNKNOWN_COLUMN`）、重名（`TABLE_EXISTS`、`INDEX_EXISTS`）和事务状态（`TRANSACTION`）。存储故障时进程停止，诊断写到 stderr，由下次启动按日志恢复。
 
 ## 设计
 
@@ -64,16 +64,16 @@ python3 verify.py .build/minivectordb --benchmark
 
 验证覆盖 Unicode 和 float32 边界、带过滤条件的 TopK、极端数值下的距离排序、索引维护、语句原子性、提交和回滚、强杀及重复恢复。限内存测试用 18 MiB 进程地址空间重启并读取超过 36 MiB 的乱序日志，检查 TopK、长字符串排序、排序并列及事务内的变更。使用 Linux `/proc/<pid>/io` 的 `rchar` 检查只需向量的 TopK 是否出现过量读取。可选基准写入 10,000 条 128 维记录、执行 1,000 个 Top10 查询，对返回距离逐条校验，并用独立穷举抽查两组排名。
 
-可以从官方快照提取 `mysqltest/`，在同一目录复跑 5 组、32 条公开 SQL。
+可以从官方快照提取 `mysqltest/`，在同一目录复跑 20 组、95 条公开 SQL。
 
 ~~~sh
 git init --bare .build/official.git
 git --git-dir=.build/official.git fetch --depth=1 --no-tags \
-  https://github.com/oceanbase/seekdb.git a3dba559c1e7ebdc48bc990ffb1a4c75d1c1075c
+  https://github.com/oceanbase/seekdb.git 9f6df2ba5acf871376e22b64a3d0724e4b575044
 git --git-dir=.build/official.git archive FETCH_HEAD mysqltest | tar -x -C .build
 python3 verify.py .build/minivectordb --public-suite .build/mysqltest
 ~~~
 
-自测为每组创建独立数据目录，按清单逐条检查成功状态、影响行数、列名和结果行。无序结果按多重集合比较，浮点距离使用绝对和相对容差 `1e-5`。公开包的 JSON 文件描述预期结果，进程通信仍使用上述本地协议。正式评测协议和隐藏用例由组织方提供。[官方公开用例说明](https://github.com/oceanbase/seekdb/tree/a3dba559c1e7ebdc48bc990ffb1a4c75d1c1075c/mysqltest)
+自测为每组创建独立数据目录，执行 `--restart` 时复用该目录，执行 `--mode ann` 后切换检索模式。按清单逐条检查成功状态、错误语义名、影响行数、列名和结果行。无序结果按多重集合比较，浮点距离使用绝对和相对容差 `1e-5`。公开包的 JSON 文件描述预期结果。本地测试经上述文本协议执行，正式通信格式以组织方配套驱动为准。[官方公开用例说明](https://github.com/oceanbase/seekdb/tree/9f6df2ba5acf871376e22b64a3d0724e4b575044/mysqltest)
 
 提交的构建入口为仓库根目录的 `Dockerfile`，学习记录为 `agent/conversation.json`。

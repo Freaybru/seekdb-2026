@@ -1,6 +1,7 @@
 """Black-box SQL, durability, bounded-memory and optional timing checks."""
 
 import argparse
+from contextlib import ExitStack
 import json
 import math
 from pathlib import Path
@@ -59,7 +60,7 @@ class Session:
 
     def error(self, sql, code):
         result = self.send(sql)
-        assert result.startswith(f"ERROR {code} "), (sql[:120], result)
+        assert result.startswith(f"ERROR {code} "), (sql[:120], code, result)
 
     def query(self, sql, expected_columns=None):
         columns, rows = self.read_result(self.send(sql))
@@ -132,40 +133,75 @@ def check_public_rows(actual, expected, unordered):
     assert all(assign(i, set()) for i in range(len(expected))), (actual, expected)
 
 
+def check_public_response(db, sql, check):
+    if "error" in check:
+        db.error(sql, check["error"])
+        return
+    status = db.send(sql)
+    if status.startswith("RESULT "):
+        assert "affected_rows" not in check, status
+        columns, raw_rows = db.read_result(status)
+        if "columns" in check:
+            columns = [unescape_cell(column) for column in columns]
+            assert columns == check["columns"], (columns, check["columns"])
+        if "rows" in check:
+            rows = [[unescape_cell(cell) for cell in row] for row in raw_rows]
+            check_public_rows(rows, check["rows"], check.get("unordered", False))
+    else:
+        assert re.fullmatch(r"OK [0-9]+", status), status
+        assert "rows" not in check and "columns" not in check, status
+        if "affected_rows" in check:
+            assert int(status[3:]) == check["affected_rows"], (status, check)
+
+
+def public_case(binary, root, suite, case):
+    sql_file = suite / case["test"]
+    expected = json.loads((suite / case["result"]).read_text(encoding="utf-8"))
+    lines = [line.strip(" \t\r") for line in sql_file.read_text(encoding="utf-8").split("\n")]
+    count = sum(bool(line) and not line.startswith("--") for line in lines)
+    assert count == len(expected) == case["statements"], "SQL and assertion counts differ"
+    checks = iter(expected)
+    mode = "exact"
+    with ExitStack() as active:
+        db = active.enter_context(Session(binary, root))
+        for line_number, line in enumerate(lines, 1):
+            if not line:
+                continue
+            try:
+                if line == "--restart":
+                    db.quit()
+                    active.close()
+                    db = active.enter_context(Session(binary, root))
+                    if mode != "exact":
+                        db.ok(f"MODE {mode}")
+                elif line in ("--mode ann", "--mode exact"):
+                    mode = line.split()[1]
+                    db.ok(f"MODE {mode}")
+                else:
+                    assert not line.startswith("--"), "unknown driver directive"
+                    check_public_response(db, line, next(checks))
+            except AssertionError as error:
+                raise AssertionError(f"line {line_number}: {line}: {error}") from error
+        db.quit()
+    return count
+
+
 def public_cases(binary, root, suite):
     manifest = json.loads((suite / "manifest.json").read_text(encoding="utf-8"))
     total = 0
+    failures = []
     for case in manifest["cases"]:
         name = case["id"]
         assert re.fullmatch(r"[A-Za-z0-9_-]+", name), name
-        sql_file = suite / "cases" / f"{name}.test"
-        expected_file = suite / "cases" / f"{name}.result"
-        statements = [line.strip() for line in sql_file.read_text(encoding="utf-8").splitlines()
-                      if line.strip()]
-        expected = json.loads(expected_file.read_text(encoding="utf-8"))
-        assert len(statements) == len(expected) == case["statements"], name
-        with Session(binary, root / name) as db:
-            for index, (sql, check) in enumerate(zip(statements, expected), 1):
-                status = db.send(sql)
-                try:
-                    if status.startswith("RESULT "):
-                        assert "affected_rows" not in check, status
-                        columns, raw_rows = db.read_result(status)
-                        rows = [[unescape_cell(cell) for cell in row] for row in raw_rows]
-                        if "columns" in check:
-                            assert [unescape_cell(column) for column in columns] == check["columns"]
-                        if "rows" in check:
-                            check_public_rows(rows, check["rows"], check.get("unordered", False))
-                    else:
-                        assert re.fullmatch(r"OK [0-9]+", status), status
-                        assert "rows" not in check and "columns" not in check, status
-                        if "affected_rows" in check:
-                            assert int(status[3:]) == check["affected_rows"], status
-                except AssertionError as error:
-                    raise AssertionError(f"{name}, statement {index}: {sql}") from error
-            db.quit()
-        total += len(statements)
-        print(f"Public sample {name}: {len(statements)}/{len(statements)}")
+        try:
+            count = public_case(binary, root / name, suite, case)
+        except AssertionError as error:
+            failures.append(name)
+            print(f"Public sample {name}: FAILED ({error})")
+        else:
+            total += count
+            print(f"Public sample {name}: {count}/{count}")
+    assert not failures, f"{len(failures)} public samples failed: {', '.join(failures)}"
     print(f"Official public samples: {len(manifest['cases'])} cases, {total} statements passed")
 
 
@@ -194,13 +230,15 @@ def functional(binary, root):
         top = "SELECT id, L2_DISTANCE(v, '[0,0]') AS d FROM docs WHERE label = '猫🦊é' ORDER BY d LIMIT 2"
         assert db.query(top, ["id", "d"]) == [["2", "5"], ["4", "5"]]
         assert db.query("SELECT id FROM docs ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 0") == []
-        for value in ("'[1]'", "'[1e39,0]'", "'[NaN,0]'", "'[Infinity,0]'", "'[1,0,]'"):
+        for value in ("'[]'", "'[1]'", "'[1,0,2]'"):
+            db.error(f"INSERT INTO docs VALUES ('a',{value},8,1)", "dimension_mismatch")
+        for value in ("'[1e39,0]'", "'[NaN,0]'", "'[Infinity,0]'", "'[1,0,]'", "'[1,0]x'"):
             db.error(f"INSERT INTO docs VALUES ('a',{value},8,1)", "VALUE")
         db.error("INSERT INTO docs VALUES ('四字符数','[1,0]',8,1)", "VALUE")
         db.error("INSERT INTO docs VALUES ('a','[1,0]',9223372036854775808,1)", "VALUE")
-        db.error("UPDATE docs SET id=0 WHERE id=4", "UNSUPPORTED")
+        db.error("UPDATE docs SET id=0 WHERE id=4", "unsupported_sql")
         db.error("SELECT id FROM docs; DELETE FROM docs", "SYNTAX")
-        db.error("DROP TABLE docs", "UNSUPPORTED")
+        db.error("DROP TABLE docs", "unsupported_sql")
         db.error("SELECT absent FROM docs", "UNKNOWN_COLUMN")
         db.error("SELECT * FROM absent", "UNKNOWN_TABLE")
         db.ok("INSERT INTO docs VALUES ('a''b','[1e-80,3.4028235e38]',8,1)", 1)
@@ -213,7 +251,7 @@ def functional(binary, root):
         db.ok("UPDATE docs SET score=9,v='[0,1]' WHERE id=4", 1)
         db.ok("DELETE FROM docs WHERE id=2", 1)
         assert db.query(top) == [["4", "1"]]
-        db.error("UPDATE docs SET score=6,v='[0]' WHERE id=4", "VALUE")
+        db.error("UPDATE docs SET score=6,v='[0]' WHERE id=4", "dimension_mismatch")
         assert db.query("SELECT score FROM docs WHERE id=4") == [["9"]]
         db.ok("ROLLBACK")
         assert db.query(top) == [["2", "5"], ["4", "5"]]
@@ -235,7 +273,7 @@ def atomicity(binary, root):
         db.ok("INSERT INTO docs VALUES (2,'earlier successful statement')", 1)
         large = "x" * 1024
         rows = ",".join(f"({i},'{large}')" for i in range(3, 350))
-        db.error(f"INSERT INTO docs VALUES {rows},(1,'duplicate')", "DUPLICATE_KEY")
+        db.error(f"INSERT INTO docs VALUES {rows},(1,'duplicate')", "duplicate_key")
         assert db.query("SELECT id,body FROM docs ORDER BY id") == [
             ["1", "original"], ["2", "earlier successful statement"]]
         db.ok("COMMIT")
