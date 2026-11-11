@@ -431,6 +431,31 @@ double avx2_l2(const char* vector, const float* query, size_t dimension) {
   return (lanes[0] + lanes[1] + lanes[2] + lanes[3]) +
          scalar_l2(vector + i * sizeof(float), query + i, dimension - i);
 }
+
+__attribute__((target("avx2")))
+double avx2_lower_square(const char* vector, const float* query, size_t dimension) {
+  __m256 sum = _mm256_setzero_ps();
+  size_t i = 0;
+  for (; i + 8 <= dimension; i += 8) {
+    __m256 data;
+    std::memcpy(&data, vector + i * sizeof(float), sizeof(data));
+    const __m256 delta = _mm256_sub_ps(data, _mm256_loadu_ps(query + i));
+    sum = _mm256_add_ps(sum, _mm256_mul_ps(delta, delta));
+  }
+  alignas(32) float lanes[8];
+  _mm256_store_ps(lanes, sum);
+  double approximate = scalar_l2(vector + i * sizeof(float), query + i, dimension - i);
+  for (float lane : lanes) approximate += lane;
+  if (!std::isfinite(approximate)) return 0;
+  // Used only for 32..4096 components. Every lane sums nonnegative squares,
+  // with at most dimension/8 additions. This deliberately loose allowance
+  // covers subtraction, multiplication, accumulation and the double reduction.
+  // The absolute allowance also covers gradual underflow (or flushed tiny
+  // products). Overflow falls back to the existing double calculation.
+  const double allowance = (4.0 * dimension + 32.0) * std::numeric_limits<float>::epsilon();
+  return std::max(0.0, approximate * (1.0 - allowance) -
+                       dimension * double{std::numeric_limits<float>::min()});
+}
 #endif
 
 double squared_distance(std::string_view vector, const std::vector<float>& query) {
@@ -629,6 +654,7 @@ void Database::apply(const Frame& frame) {
 }
 
 void Database::undo(uint64_t target, uint64_t cursor) {
+  log_.release_reads();
   while (cursor > target) {
     const Frame frame = log_.frame_before(cursor);
     cursor = frame.offset;
@@ -676,6 +702,7 @@ void Database::build_index(Table& current) {
     // Exact search stays available when the optional projection cannot fit.
     return;
   }
+  log_.prepare_reads();
   for (const auto& [key, row] : current.rows) {
     const float pivot = load<float>(log_.read(row.offset + Frame::header_size, sizeof(float)));
     current.index.push_back({pivot, key, row});
@@ -821,6 +848,7 @@ uint64_t Database::write(const Delete& statement) {
 }
 
 void Database::transact(Transaction operation) {
+  log_.release_reads();
   if (operation == Transaction::begin) {
     if (transaction_) throw SqlError("TRANSACTION", "transaction already active");
     transaction_ = log_.end();
@@ -851,6 +879,7 @@ void Database::execute(const Statement& statement, SearchMode mode, ResultSink& 
       transact(command);
       sink.ok(0);
     } else {
+      log_.release_reads();
       const uint64_t mark = log_.end();
       uint64_t affected;
       try {
@@ -1065,10 +1094,20 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
     std::vector<Neighbor> nearest;
     const bool bounded = statement.limit.has_value();
     if (bounded) nearest.reserve(std::min<size_t>(limit, 1024));
+#if defined(__x86_64__)
+    const bool float_bound = bounded && !descending && queries[query].size() >= 32 &&
+                             queries[query].size() <= 4096 && __builtin_cpu_supports("avx2");
+#endif
     const auto probe = [&](int64_t key, RowRef row) {
       if (included(key, row)) {
-        collect(nearest, Neighbor{{key, row}, distance(vector_payload(row), query)},
-                limit, bounded, better);
+        const auto bytes = vector_payload(row);
+#if defined(__x86_64__)
+        if (float_bound && nearest.size() == limit &&
+            separated_squares(avx2_lower_square(bytes.data(), queries[query].data(),
+                                                queries[query].size()),
+                              nearest.front().squared, margin) > 0) return;
+#endif
+        collect(nearest, Neighbor{{key, row}, distance(bytes, query)}, limit, bounded, better);
       }
     };
     if (mode == SearchMode::ann && bounded && !descending && !current.index_name.empty()) {

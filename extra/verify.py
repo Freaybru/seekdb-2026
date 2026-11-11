@@ -668,6 +668,67 @@ def indexed_ties(binary, root):
     print("Indexed search ties, extreme float32 ranking, filtering and rollback/restart: passed")
 
 
+def conservative_bounds(binary, root):
+    rng = random.Random(625139)
+
+    def integer(value):
+        numerator, denominator = value.as_integer_ratio()
+        return (numerator << 149) // denominator
+
+    checks = []
+    with Session(binary, root) as db:
+        for dimension in (31, 32, 33, 63, 64, 65, 127, 128, 129, 256, 4096, 4097):
+            name = f"bound_{dimension}"
+            size = 48 if dimension > 256 else 96
+            scales = (2.0**-149, 1e-20, 1.0, 1e18, 1e37)
+            vectors = [list(array("f", (rng.randint(-8, 8) * scales[key % 5]
+                                      for _ in range(dimension)))) for key in range(size)]
+            # Equal huge components hide the small differences from double
+            # sums; exact integer squares must still determine the order.
+            for key in range(8):
+                vectors[key] = [0.0] * dimension
+                vectors[key][0] = array("f", [1e30])[0]
+                vectors[key][-1] = float(7 - key)
+            vectors[9] = vectors[8].copy()
+            units = [[integer(value) for value in vector] for vector in vectors]
+            db.ok(f"CREATE TABLE {name} (id BIGINT PRIMARY KEY, tag BIGINT, v VECTOR({dimension}))")
+            keys = list(range(size))
+            rng.shuffle(keys)
+            for start in range(0, size, 16):
+                batch = keys[start:start+16]
+                values = ",".join(f"({key},{key % 3},'{json.dumps(vectors[key])}')" for key in batch)
+                db.ok(f"INSERT INTO {name} VALUES " + values, len(batch))
+            db.ok(f"CREATE VECTOR INDEX ix_{dimension} ON {name}(v)")
+            queries = [[0.0] * dimension, vectors[8], vectors[23]]
+            queries.extend(list(array("f", (rng.randint(-8, 8) * scale
+                                             for _ in range(dimension)))) for scale in scales)
+            for number, query in enumerate(queries):
+                query_units = list(map(integer, query))
+                squares = [sum((a-b)**2 for a, b in zip(vector, query_units)) for vector in units]
+                tag = number % 3 if number % 2 else None
+                eligible = [key for key in range(size) if tag is None or key % 3 == tag]
+                order = sorted(eligible, key=lambda key: (squares[key], key))
+                where = f" WHERE tag={tag}" if tag is not None else ""
+                sql = (f"SELECT id FROM {name}{where} ORDER BY "
+                       f"L2_DISTANCE(v,'{json.dumps(query)}') LIMIT 7")
+                checks.append((sql, [[str(key)] for key in order[:7]]))
+            tied = (f"SELECT id FROM {name} WHERE id<8 ORDER BY "
+                    f"L2_DISTANCE(v,'{json.dumps([0.0] * dimension)}') LIMIT 4")
+            checks.append((tied, [[str(key)] for key in (7, 6, 5, 4)]))
+        for mode in ("exact", "ann"):
+            db.ok(f"MODE {mode}")
+            for sql, expected in checks:
+                assert db.query(sql) == expected, (mode, sql[:100], expected)
+        db.quit()
+    with Session(binary, root) as db:
+        for mode in ("exact", "ann"):
+            db.ok(f"MODE {mode}")
+            for sql, expected in checks:
+                assert db.query(sql) == expected, ("restart", mode, sql[:100], expected)
+        db.quit()
+    print("432 high-dimensional exact-integer TopK comparisons: ties, underflow, overflow and restart passed")
+
+
 def benchmark(binary, root):
     rng = random.Random(382901)
     dimension, size, k = 128, 10_000, 10
@@ -746,6 +807,7 @@ def main():
         shutdown_backpressure(binary, root / "backpressure")
         partial_log(binary, root / "partial")
         indexed_ties(binary, root / "index")
+        conservative_bounds(binary, root / "bounds")
         bounded_memory(binary, root / "large")
         indexed_memory(binary, root / "index-memory")
         if options.stress:

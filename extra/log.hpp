@@ -80,6 +80,7 @@ class Log {
   std::string_view read(uint64_t offset, uint32_t length);
   int compare_bytes(uint64_t left, uint32_t left_size, uint64_t right, uint32_t right_size);
   void prepare_reads();
+  void release_reads() { unmap(); }
 
  private:
   void flush();

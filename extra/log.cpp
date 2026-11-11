@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -21,7 +22,7 @@ constexpr uint32_t header_size = Frame::header_size;
 constexpr uint32_t frame_overhead = header_size + sizeof(uint32_t);
 constexpr uint64_t read_page = 4 * 1024;
 constexpr size_t block_size = 256 * 1024;
-constexpr size_t map_limit = 16 * 1024 * 1024;
+constexpr size_t map_limit = 256 * 1024 * 1024;
 
 [[noreturn]] void io_error(const char* operation) {
   throw std::system_error(errno, std::generic_category(), operation);
@@ -115,7 +116,13 @@ void Log::flush() {
 }
 
 void Log::prepare_reads() {
-  if (mapping_ || disk_end_ > map_limit || !pending_.empty()) return;
+  if (mapping_ || !pending_.empty()) return;
+  uint64_t budget = map_limit;
+  struct rlimit address_limit {};
+  if (::getrlimit(RLIMIT_AS, &address_limit) == 0 && address_limit.rlim_cur != RLIM_INFINITY) {
+    budget = std::min<uint64_t>(budget, address_limit.rlim_cur / 4);
+  }
+  if (disk_end_ > budget) return;
   void* mapped = ::mmap(nullptr, disk_end_, PROT_READ, MAP_SHARED, fd_, 0);
   if (mapped != MAP_FAILED) {
     mapping_ = static_cast<const char*>(mapped);
