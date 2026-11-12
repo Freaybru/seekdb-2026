@@ -38,6 +38,7 @@ class Database {
   void undo(uint64_t target, uint64_t cursor);
   void invalidate_index(Table& table);
   void build_index(Table& table);
+  void prepare_bounds(Table& table);
 
   uint64_t write(const CreateTable& statement);
   uint64_t write(const CreateIndex& statement);
@@ -52,6 +53,7 @@ class Database {
   std::vector<std::unique_ptr<Table>> tables_;
   std::map<std::string, uint32_t, std::less<>> names_;
   size_t index_bytes_ = 0;
+  size_t bound_bytes_ = 0;
 };
 
 }  // namespace mini

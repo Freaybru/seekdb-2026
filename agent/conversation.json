@@ -1,126 +1,206 @@
 {
   "title": "MiniVectorDB 项目决策与提测记录",
-  "material_summary": "我先明确本地改动和远程提交的边界，在正式提测连续失败且没有失败用例时要求扩大自建测试并保持官方回归通过。我要求核对最新官方提交。在 4cd0dfe 的 MySQL 正式用例通过后，我把目标调整为修正 Prompt 材料并改善性能。下文保留这些要求的原文、对应版本及可复核的程序输出。",
+  "material_summary": "我先限定本地改动范围，要求在官方用例不回退的前提下补充自建测试。在 4cd0dfe 和 faf9d110 的 MySQL 正式用例通过后，我继续反馈两项评分的结果。我要求继续提高性能原始指标，目标提高到 5000 以上，同时保留官方用例的通过要求，并继续处理 Agent Prompt 的有效性。本文件保留相关原话、对应版本与实际验证。",
   "rule_version": "agent-learning-evidence-v3-unbounded",
   "synthetic": false,
-  "scope": "选录与项目范围、失败反馈、验证要求和优先级调整有关的交互。第一人称过程摘要依据用户原文整理；答复、提测反馈与程序输出分别记录。",
+  "scope": "按原对话选录约束、版本核对、验证要求和提测反馈。消息正文独立存为字符串；第一人称过程摘要依据用户原文整理，测试结果标明验证范围。",
   "project": {
     "assignment": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6",
     "branch": "2026-competition-round2",
-    "baseline_commit": "4cd0dfefe2889356e35d3fa86bb67156557c5e3b",
+    "baseline_commit": "faf9d1108ff58b6c12b38df0507ce59346ec262d",
     "official_commit": "f4d4e26653af823a7601668802f80e374ad6643c",
-    "official_protocol": "https://github.com/oceanbase/seekdb/blob/f4d4e26653af823a7601668802f80e374ad6643c/STDIO_PROTOCOL.md"
+    "official_protocol": "https://github.com/oceanbase/seekdb/blob/f4d4e26653af823a7601668802f80e374ad6643c/STDIO_PROTOCOL.md",
+    "previous_baseline_commit": "4cd0dfefe2889356e35d3fa86bb67156557c5e3b"
   },
   "conversations": [
     {
-      "id": "U01",
       "role": "user",
-      "content": [
-        "（要求这个对话内所有操作只能在“extra”文件夹中进行）你的任务是按照要求完成这个题目https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6#haC5C。",
-        "你可以连接我GitHub上面的“seekdb-2026”仓库，进行需要的操作。",
-        "提交或其他操作时对其他分支/本分支内其他文件夹/仓库基本信息的任何内容不可修改（若有需求可以新建分支）。",
-        "你可以去进行其他的操作，保证按照题目要求完成，远程仓库内容可以直接提交。",
-        "不要在远程仓库暴露本地的信息（包括文件地址等），不要有冗余的文件。"
-      ]
+      "id": "U01.1",
+      "content": "（要求这个对话内所有操作只能在“extra”文件夹中进行）你的任务是按照要求完成这个题目https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6#haC5C。",
+      "message_id": "U01"
     },
     {
+      "role": "user",
+      "id": "U01.2",
+      "content": "你可以连接我GitHub上面的“seekdb-2026”仓库，进行需要的操作。",
+      "message_id": "U01"
+    },
+    {
+      "role": "user",
+      "id": "U01.3",
+      "content": "提交或其他操作时对其他分支/本分支内其他文件夹/仓库基本信息的任何内容不可修改（若有需求可以新建分支）。",
+      "message_id": "U01"
+    },
+    {
+      "role": "user",
+      "id": "U01.4",
+      "content": "你可以去进行其他的操作，保证按照题目要求完成，远程仓库内容可以直接提交。",
+      "message_id": "U01"
+    },
+    {
+      "role": "user",
+      "id": "U01.5",
+      "content": "不要在远程仓库暴露本地的信息（包括文件地址等），不要有冗余的文件。",
+      "message_id": "U01"
+    },
+    {
+      "role": "user",
       "id": "U02",
-      "role": "user",
-      "content": [
-        "查看原仓库的2026-competition-round2分支是否更新了测试文件，若有更新，结合原先的题目以及要求，改进项目并推送"
-      ]
+      "content": "查看原仓库的2026-competition-round2分支是否更新了测试文件，若有更新，结合原先的题目以及要求，改进项目并推送"
     },
     {
+      "role": "user",
       "id": "U03",
-      "role": "user",
-      "content": [
-        "我所说的 “限制在extra文件夹中”指的是本地电脑改动，远程仓库主要看题目要求，不一定要限制在一个文件夹中"
-      ]
+      "content": "我所说的 “限制在extra文件夹中”指的是本地电脑改动，远程仓库主要看题目要求，不一定要限制在一个文件夹中"
     },
     {
-      "id": "U04",
       "role": "user",
-      "content": [
-        "[https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6](https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6)",
-        "这个是最新的题目链接，再检查一遍是否有没做到的，若有将其改进"
-      ]
+      "id": "U04.1",
+      "content": "[https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6](https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6)",
+      "message_id": "U04"
     },
     {
+      "role": "user",
+      "id": "U04.2",
+      "content": "这个是最新的题目链接，再检查一遍是否有没做到的，若有将其改进",
+      "message_id": "U04"
+    },
+    {
+      "role": "user",
       "id": "U05",
-      "role": "user",
-      "content": [
-        "那就继续另想办法改进"
-      ]
+      "content": "那就继续另想办法改进"
     },
     {
-      "id": "U06",
       "role": "user",
-      "content": [
-        "71196e20cf3806d11b2ec35c1dfc4f50cb3c2c92这次提测也失败了，没显示用例。但是官方原仓库更新了。",
-        "结合所有资料继续想办法改进"
-      ]
+      "id": "U06.1",
+      "content": "71196e20cf3806d11b2ec35c1dfc4f50cb3c2c92这次提测也失败了，没显示用例。但是官方原仓库更新了。",
+      "message_id": "U06"
     },
     {
+      "role": "user",
+      "id": "U06.2",
+      "content": "结合所有资料继续想办法改进",
+      "message_id": "U06"
+    },
+    {
+      "role": "user",
       "id": "U07",
-      "role": "user",
-      "content": [
-        "提测平台一天只能提测两次，今天已经消耗了一次。你再想办法改进到你认为可以通过的情况，可以多方面找用例，但是不要让官方用例回退。"
-      ]
+      "content": "提测平台一天只能提测两次，今天已经消耗了一次。你再想办法改进到你认为可以通过的情况，可以多方面找用例，但是不要让官方用例回退。"
     },
     {
+      "role": "user",
       "id": "U08",
-      "role": "user",
-      "content": [
-        "你可以自己随意创建测试，不要让官方用例回退即可。"
-      ]
+      "content": "你可以自己随意创建测试，不要让官方用例回退即可。"
     },
     {
+      "role": "user",
       "id": "U09",
-      "role": "user",
-      "content": [
-        "提测平台没有失败详情，要你自己改进。你可以自己建立测试，全方位一些多一些。同时要保证官方用例不回退。"
-      ]
+      "content": "提测平台没有失败详情，要你自己改进。你可以自己建立测试，全方位一些多一些。同时要保证官方用例不回退。"
     },
     {
+      "role": "user",
       "id": "U10",
-      "role": "user",
-      "content": [
-        "你是否使用查看了官方的最新提交f4d4e26653af823a7601668802f80e374ad6643c？"
-      ]
+      "content": "你是否使用查看了官方的最新提交f4d4e26653af823a7601668802f80e374ad6643c？"
     },
     {
-      "id": "U11",
       "role": "user",
       "selection": "提测反馈及下一阶段目标的原文摘录",
-      "content": [
-        "4cd0dfe的提测详情为：",
-        "MySQL 正式用例：通过；此项为准入条件，不计排名分",
-        "性能原始分：性能评测完成；原始指标 E = 2797.430116",
-        "Agent Prompt 原始分：Prompt结果无效、待复核、超出平台0–100范围或缺少材料摘要，本项不参与排名；未截断或换算本地分数。",
-        "现在主要目标是让“Agent Prompt 原始分”有效，同时尽量提高“性能原始分”"
-      ]
+      "id": "U11.1",
+      "content": "4cd0dfe的提测详情为：",
+      "message_id": "U11"
     },
     {
-      "id": "A07",
+      "role": "user",
+      "selection": "提测反馈及下一阶段目标的原文摘录",
+      "id": "U11.2",
+      "content": "MySQL 正式用例：通过；此项为准入条件，不计排名分",
+      "message_id": "U11"
+    },
+    {
+      "role": "user",
+      "selection": "提测反馈及下一阶段目标的原文摘录",
+      "id": "U11.3",
+      "content": "性能原始分：性能评测完成；原始指标 E = 2797.430116",
+      "message_id": "U11"
+    },
+    {
+      "role": "user",
+      "selection": "提测反馈及下一阶段目标的原文摘录",
+      "id": "U11.4",
+      "content": "Agent Prompt 原始分：Prompt结果无效、待复核、超出平台0–100范围或缺少材料摘要，本项不参与排名；未截断或换算本地分数。",
+      "message_id": "U11"
+    },
+    {
+      "role": "user",
+      "selection": "提测反馈及下一阶段目标的原文摘录",
+      "id": "U11.5",
+      "content": "现在主要目标是让“Agent Prompt 原始分”有效，同时尽量提高“性能原始分”",
+      "message_id": "U11"
+    },
+    {
       "role": "assistant",
       "related_prompts": [
         "U01",
         "U03"
       ],
-      "content": [
-        "公开包明确了 32 条 SQL 的输入和预期结果，但还未公开进程通信协议。我已把这 5 组用例接入自测，并调整了提交布局：远程仓库根目录提供 Dockerfile，学习材料放在题面指定的 `agent/conversation.json`。"
-      ]
+      "id": "A07",
+      "content": "公开包明确了 32 条 SQL 的输入和预期结果，但还未公开进程通信协议。我已把这 5 组用例接入自测，并调整了提交布局：远程仓库根目录提供 Dockerfile，学习材料放在题面指定的 `agent/conversation.json`。"
     },
     {
-      "id": "A09",
       "role": "assistant",
       "related_prompts": [
         "U02",
         "U06"
       ],
-      "content": [
-        "用 `71196e2` 跑新版题包后，复现了 4 组错误码断言不匹配，其余 16 组通过。我会对齐公开包里的三个语义名，并区分向量维度不符和数值非法。正式驱动仍未随这次更新发布。"
-      ]
+      "id": "A09",
+      "content": "用 `71196e2` 跑新版题包后，复现了 4 组错误码断言不匹配，其余 16 组通过。我会对齐公开包里的三个语义名，并区分向量维度不符和数值非法。正式驱动仍未随这次更新发布。"
+    },
+    {
+      "id": "U12.1",
+      "message_id": "U12",
+      "role": "user",
+      "selection": "提测反馈及目标的原文摘录",
+      "content": "faf9d110的提测详情为："
+    },
+    {
+      "id": "U12.2",
+      "message_id": "U12",
+      "role": "user",
+      "selection": "提测反馈及目标的原文摘录",
+      "content": "MySQL 正式用例：通过；此项为准入条件，不计排名分"
+    },
+    {
+      "id": "U12.3",
+      "message_id": "U12",
+      "role": "user",
+      "selection": "提测反馈及目标的原文摘录",
+      "content": "性能原始分：性能评测完成；原始指标 E = 3152.922828"
+    },
+    {
+      "id": "U12.4",
+      "message_id": "U12",
+      "role": "user",
+      "selection": "提测反馈及目标的原文摘录",
+      "content": "Agent Prompt 原始分：Prompt结果无效、待复核、超出平台0–100范围"
+    },
+    {
+      "id": "U12.5",
+      "message_id": "U12",
+      "role": "user",
+      "selection": "提测反馈及目标的原文摘录",
+      "content": "1.改进“性能原始分”，要求起码改进到4000分以上。"
+    },
+    {
+      "id": "U12.6",
+      "message_id": "U12",
+      "role": "user",
+      "selection": "提测反馈及目标的原文摘录",
+      "content": "2.必须让“Agent Prompt 原始分”有效。"
+    },
+    {
+      "id": "U13",
+      "role": "user",
+      "content": "尽量让性能分提高到5000分以上，同时别忘了官方用例不能回退"
     }
   ],
   "first_person_review": [
@@ -128,8 +208,8 @@
       "id": "R01",
       "statement": "我先限定修改范围，并明确不改动其他分支和仓库基本信息。随后我澄清 extra 的限制针对本地电脑，远程文件布局按题目要求执行。",
       "request_pointers": [
-        "/conversations/0/content/2",
-        "/conversations/2/content/0"
+        "/conversations/2/content",
+        "/conversations/6/content"
       ],
       "result_pointers": []
     },
@@ -137,10 +217,10 @@
       "id": "R02",
       "statement": "我要求检查原仓库的测试文件更新，并结合最新题目检查遗漏。正式提测失败且没有用例信息后，我要求结合官方更新继续改进。 后来我明确要求核对 f4d4e26653af823a7601668802f80e374ad6643c。",
       "request_pointers": [
-        "/conversations/1/content/0",
-        "/conversations/3/content/1",
-        "/conversations/5/content/0",
-        "/conversations/9/content/0"
+        "/conversations/5/content",
+        "/conversations/8/content",
+        "/conversations/10/content",
+        "/conversations/15/content"
       ],
       "result_pointers": [
         "/experiments/0/output"
@@ -150,9 +230,9 @@
       "id": "R03",
       "statement": "我提醒每天只有两次正式提测机会。面对没有失败详情的情况，我要求扩大自建测试，同时多次强调官方用例不能回退。",
       "request_pointers": [
-        "/conversations/6/content/0",
-        "/conversations/7/content/0",
-        "/conversations/8/content/0"
+        "/conversations/12/content",
+        "/conversations/13/content",
+        "/conversations/14/content"
       ],
       "result_pointers": [
         "/experiments/1/output",
@@ -163,14 +243,31 @@
       "id": "R05",
       "statement": "我反馈 4cd0dfe 的 MySQL 正式用例已通过，同时提供性能指标和 Prompt 无效的完整提示。之后我把重点调整为 Prompt 有效性和性能优化。",
       "request_pointers": [
-        "/conversations/10/content/1",
-        "/conversations/10/content/2",
-        "/conversations/10/content/3",
-        "/conversations/10/content/4"
+        "/conversations/17/content",
+        "/conversations/18/content",
+        "/conversations/19/content",
+        "/conversations/20/content"
       ],
       "result_pointers": [
         "/experiments/3/output",
         "/experiments/4/output"
+      ]
+    },
+    {
+      "id": "R06",
+      "statement": "我反馈 faf9d110 的 MySQL 正式用例继续通过，性能原始指标为 3152.922828，而 Prompt 仍未计分。我将下一版的性能目标由 4000 以上提高到 5000 以上，重申官方用例不能回退，并要求继续处理 Prompt 有效性。",
+      "request_pointers": [
+        "/conversations/24/content",
+        "/conversations/25/content",
+        "/conversations/26/content",
+        "/conversations/27/content",
+        "/conversations/28/content",
+        "/conversations/29/content"
+      ],
+      "result_pointers": [
+        "/experiments/5/output",
+        "/experiments/6/output",
+        "/experiments/7/output"
       ]
     }
   ],
@@ -267,11 +364,121 @@
       "method": "相同种子，每条记录增加 1024 个汉字；日志为 36,283,331 字节。重启后核对全部 20 组排名，并读取查询前后的 syscr 和进程 VmHWM。",
       "output": "读取系统调用 200,020 → 20 次；进程峰值 RSS 2.5 → 37.2 MiB。20 组排名均通过。",
       "limit": "只读映射页计入进程 RSS。进程读调用与 RSS 不是平台的 cgroup 设备读写量和内存峰值。"
+    },
+    {
+      "id": "E06",
+      "topic": "乱序主键、均匀向量和 BIGINT 过滤",
+      "source": "相同机器、编译选项和官方 JSONL 传输下交替运行两版程序",
+      "method": "种子 71371；10,000 条 128 维记录，100 批提交，重启并建索引，预热后执行 1,000 次 Top10。半数请求带等值过滤。每轮检查所有距离与两版完整排名，另用独立穷举验证 40 组。",
+      "output": "5 轮中位数：1,000 次查询 0.564 s → 0.131 s；100 批提交 0.407 s → 0.279 s；排名与基线全部一致。",
+      "preparation_seconds_median": [
+        3.033658,
+        0.112931
+      ],
+      "process_peak_rss_kib_median": [
+        8160,
+        9920
+      ],
+      "committed_log_bytes": 5623331,
+      "rounds": [
+        {
+          "version": "faf9d110",
+          "write_seconds": [
+            0.414366,
+            0.446168,
+            0.405449,
+            0.401447,
+            0.407046
+          ],
+          "query_seconds": [
+            0.56402,
+            0.59357,
+            0.658152,
+            0.51737,
+            0.526908
+          ]
+        },
+        {
+          "version": "本轮候选",
+          "write_seconds": [
+            0.284075,
+            0.324568,
+            0.278102,
+            0.279284,
+            0.277877
+          ],
+          "query_seconds": [
+            0.134342,
+            0.19942,
+            0.12711,
+            0.123919,
+            0.131484
+          ]
+        }
+      ],
+      "limit": "仅为本地端到端耗时及进程 RSS。未在平台 cgroup 下采样，不能据此换算官方 E。"
+    },
+    {
+      "id": "E07",
+      "topic": "有序主键、高斯向量和 Unicode 字符串过滤",
+      "source": "相同机器、编译选项和官方 JSONL 传输下交替运行两版程序",
+      "method": "种子 512907；10,000 条 128 维记录，100 批提交，重启并建索引，预热后执行 1,000 次 Top10。半数请求带等值过滤。每轮检查所有距离与两版完整排名，另用独立穷举验证 40 组。",
+      "output": "3 轮中位数：1,000 次查询 0.446 s → 0.157 s；100 批提交 0.452 s → 0.330 s；排名与基线全部一致。",
+      "preparation_seconds_median": [
+        0.154407,
+        0.10312
+      ],
+      "process_peak_rss_kib_median": [
+        8000,
+        9760
+      ],
+      "committed_log_bytes": 5623331,
+      "rounds": [
+        {
+          "version": "faf9d110",
+          "write_seconds": [
+            0.432807,
+            0.452377,
+            0.462784
+          ],
+          "query_seconds": [
+            0.466836,
+            0.439956,
+            0.445715
+          ]
+        },
+        {
+          "version": "本轮候选",
+          "write_seconds": [
+            0.341518,
+            0.329963,
+            0.317314
+          ],
+          "query_seconds": [
+            0.191363,
+            0.144439,
+            0.156826
+          ]
+        }
+      ],
+      "limit": "仅为本地端到端耗时及进程 RSS。未在平台 cgroup 下采样，不能据此换算官方 E。"
+    },
+    {
+      "id": "E08",
+      "topic": "本轮镜像、量化剪枝与解析回归",
+      "source": "未修改的官方检查器以及 verify.py 的实际输出",
+      "method": "按根 Dockerfile 构建镜像，官方检查器验证隔离环境中的默认入口。量化用例覆盖 33/128/129 维、并列、过滤分组及回退、量化范围外查询、更新、失败写入、回滚和重启。",
+      "output": "handshake: PASS\nOfficial public samples: 20 cases, 95 statements passed\nPacked TopK: exact integer ranks, padding, filter buckets, out-of-range queries and mutation/restart passed",
+      "related_output": [
+        "Quoted SQL, decimal and exponent syntax, and invalid float32 writes: passed",
+        "600,000 narrow rows recovered from 28,819,383 bytes with a 27,262,976-byte address limit"
+      ]
     }
   ],
   "verification_limits": [
-    "正式平台结果引用上面的提测反馈；本次修订尚未再次消耗正式提测次数。",
-    "官方公开检查与自建回归可在仓库内复跑，公开通过不能替代平台保留用例。",
-    "材料文件的格式及引用检查不能确定平台返回无效提示的具体分支，也不能证明已经得到有效排名分。"
-  ]
+    "正式平台反馈对应已提测的 4cd0dfe 和 faf9d110；本轮程序输出来自本地复测。",
+    "本地公开检查不能替代平台保留用例；本轮没有平台原始分或有效评审报告。",
+    "现有合并提示未标明待复核、评分结果校验或分数范围中的具体触发项。"
+  ],
+  "coverage": "可引用的个人记录涵盖范围澄清、回归要求、版本追问及提测反馈。本轮没有提交个人技术推导或预先写下的验证预测；实验部分记录程序检查结果。"
 }

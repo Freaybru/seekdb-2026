@@ -5,6 +5,10 @@
 #include <ostream>
 #include <set>
 
+#if defined(__x86_64__)
+#include <emmintrin.h>
+#endif
+
 namespace mini::wire {
 
 struct Request {
@@ -114,8 +118,32 @@ class RequestReader {
     }
   }
 
+  static bool plain_string(std::string_view text) {
+#if defined(__x86_64__)
+    const auto escape = _mm_set1_epi8('\\');
+    const auto max_control = _mm_set1_epi8(0x1f);
+    while (text.size() >= 16) {
+      const auto bytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(text.data()));
+      const auto control = _mm_cmpeq_epi8(_mm_min_epu8(bytes, max_control), bytes);
+      if (_mm_movemask_epi8(_mm_or_si128(control, _mm_cmpeq_epi8(bytes, escape)))) return false;
+      text.remove_prefix(16);
+    }
+#endif
+    for (unsigned char ch : text) {
+      if (ch < 0x20 || ch == '\\') return false;
+    }
+    return true;
+  }
+
   std::string string() {
     expect('"');
+    const auto close = line_.find('"', at_);
+    if (close == line_.npos) invalid("incomplete JSON");
+    const auto plain = line_.substr(at_, close - at_);
+    if (plain_string(plain)) {
+      at_ = close + 1;
+      return std::string(plain);
+    }
     std::string result;
     for (char ch = next(); ch != '"'; ch = next()) {
       if (static_cast<unsigned char>(ch) < 0x20) invalid("unescaped JSON control character");

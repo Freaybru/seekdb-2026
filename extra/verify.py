@@ -311,7 +311,9 @@ def json_wire(binary, root):
                        f"({largest},'duplicate','[1,0]')")["error"]["code"] == "duplicate_key"
         for malformed in ('{"id":1,"id":2,"op":"shutdown"}',
                           '{"id":NaN,"op":"shutdown"}',
-                          r'{"id":"\ud800","op":"shutdown"}'):
+                          r'{"id":"\ud800","op":"shutdown"}',
+                          '{"id":2,"op":"execute","sql":"' + 'a' * 42 + '\x1f"}',
+                          '{"id":2,"op":"execute","sql":"' + 'a' * 42 + '\\q"}'):
             response = json.loads(db.send(malformed))
             assert response["ok"] is False and response["error"]["code"] == "invalid_request"
         assert request(db, 1.25, op="other")["ok"] is False
@@ -322,6 +324,22 @@ def json_wire(binary, root):
         assert request(db, 0, "SELECT body FROM docs")["rows"] == [[text]]
         shutdown(db, ["done", 7])
     print("Default JSONL: typed IDs and values, multiline SQL, Unicode, errors and shutdown passed")
+
+
+def vector_syntax(binary, root):
+    with Session(binary, root) as db:
+        db.ok("CREATE TABLE `Vec``Test` (id BIGINT PRIMARY KEY, v VECTOR(3), txt VARCHAR(96))")
+        db.ok("INSERT INTO `Vec``Test` VALUES (1,'[+.5,1.e+0,-1e-500]','a''b\\t甲')", 1)
+        assert db.query("SELECT txt FROM `vec``test`") == [["a'b\\t甲"]]
+        distance = db.query("SELECT L2_DISTANCE(v,'[.5,1,0]') FROM `vec``test`")
+        assert float(distance[0][0]) == 0
+        for value in ("[1e+,2,3]", "[+-1,2,3]", "[1e999,2,3]", "[0x1p0,2,3]",
+                      "[NaN,2,3]", "[1,2,3,]", "[1,2,3] trailing"):
+            db.error(f"UPDATE `vec``test` SET v='{value}'", "VALUE")
+        db.error("UPDATE `vec``test` SET v='[1,2]'", "dimension_mismatch")
+        assert float(db.query("SELECT L2_DISTANCE(v,'[.5,1,0]') FROM `vec``test`")[0][0]) == 0
+        db.quit()
+    print("Quoted SQL, decimal and exponent syntax, and invalid float32 writes: passed")
 
 
 def script_input(binary, root):
@@ -729,6 +747,77 @@ def conservative_bounds(binary, root):
     print("432 high-dimensional exact-integer TopK comparisons: ties, underflow, overflow and restart passed")
 
 
+def packed_bounds(binary, root):
+    rng = random.Random(218443)
+
+    def units(vector):
+        return [(a << 149) // b for a, b in (value.as_integer_ratio() for value in vector)]
+
+    # Both the fixed 128-byte scan and the padded, variable-stride scan.
+    for dimension, scale in ((33, 2.0**-143), (128, 1.0), (129, 1e35)):
+        folder = root / str(dimension)
+        values = {key: list(array("f", (rng.uniform(-scale, scale) for _ in range(dimension))))
+                  for key in range(-320, 320)}
+        values[-305] = values[-304].copy()
+        pairs = {key: units(vector) for key, vector in values.items()}
+        queries = [values[-304], values[10], [0.0] * dimension,
+                   [array("f", [scale * 3])[0]] * dimension]
+
+        def check(db, state, retagged=False):
+            for i, query in enumerate(queries):
+                q = units(query)
+                where = " WHERE id>=-310 AND id<=100 AND tag='组0'" if i == 1 else ""
+                eligible = (key for key in state if i != 1 or -310 <= key <= 100 and
+                            (key % 4 == 0 or retagged and key == 10))
+                top = sorted(eligible, key=lambda key:
+                             (sum((a-b)**2 for a, b in zip(state[key], q)), key))[:10]
+                sql = f"SELECT id FROM t{where} ORDER BY L2_DISTANCE(v,'{json.dumps(query)}') LIMIT 10"
+                assert db.query(sql) == [[str(key)] for key in top], (dimension, i, top)
+            assert db.query(f"SELECT id FROM t WHERE id=99 AND id=100 ORDER BY "
+                            f"L2_DISTANCE(v,'{json.dumps(queries[0])}') LIMIT 5") == []
+            assert db.query(f"SELECT id FROM t WHERE tag='不存在' ORDER BY "
+                            f"L2_DISTANCE(v,'{json.dumps(queries[0])}') LIMIT 5") == []
+            assert db.query(f"SELECT id FROM t WHERE id>10 AND id<12 AND tag='组0' ORDER BY "
+                            f"L2_DISTANCE(v,'{json.dumps(queries[0])}') LIMIT 5") == []
+
+        with Session(binary, folder) as db:
+            db.ok(f"CREATE TABLE t (id BIGINT PRIMARY KEY, tag VARCHAR(8), marker BIGINT, v VECTOR({dimension}))")
+            keys = list(values)
+            rng.shuffle(keys)
+            for start in range(0, len(keys), 32):
+                batch = keys[start:start+32]
+                tuples = ",".join(f"({key},'组{key % 4}',{key + 1},'{json.dumps(values[key])}')" for key in batch)
+                db.ok("INSERT INTO t VALUES " + tuples, len(batch))
+            db.ok("CREATE VECTOR INDEX ix ON t(v)")
+            check(db, pairs)
+            check(db, pairs)
+            zero = json.dumps([0.0] * dimension)
+            db.error(f"INSERT INTO t VALUES (640,'组0',641,'{zero}'),(1,'组1',2,'{zero}')", "duplicate_key")
+            check(db, pairs)
+            db.ok("BEGIN")
+            db.ok(f"UPDATE t SET v='{zero}' WHERE id=10", 1)
+            db.ok("DELETE FROM t WHERE id=-304", 1)
+            edited = dict(pairs)
+            edited[10] = [0] * dimension
+            del edited[-304]
+            check(db, edited)
+            db.ok("ROLLBACK")
+            check(db, pairs)
+            db.ok("UPDATE t SET tag='组0' WHERE id=10", 1)
+            check(db, pairs, retagged=True)
+            db.ok(f"UPDATE t SET v='{zero}' WHERE id=10", 1)
+            pairs[10] = [0] * dimension
+            check(db, pairs, retagged=True)
+            db.quit()
+        with Session(binary, folder) as db:
+            # An equality on a high-cardinality column must fall back safely.
+            assert db.query(f"SELECT id FROM t WHERE marker=11 ORDER BY "
+                            f"L2_DISTANCE(v,'{json.dumps(queries[0])}') LIMIT 5") == [["10"]]
+            check(db, pairs, retagged=True)
+            db.quit()
+    print("Packed TopK: exact integer ranks, padding, filter buckets, out-of-range queries and mutation/restart passed")
+
+
 def benchmark(binary, root):
     rng = random.Random(382901)
     dimension, size, k = 128, 10_000, 10
@@ -800,6 +889,7 @@ def main():
         if options.public_suite is not None:
             public_cases(binary, root / "public", options.public_suite)
         json_wire(binary, root / "json")
+        vector_syntax(binary, root / "vector-syntax")
         functional(binary, root / "sql")
         script_input(binary, root / "framing")
         paged_mutations(binary, root / "directory")
@@ -808,6 +898,7 @@ def main():
         partial_log(binary, root / "partial")
         indexed_ties(binary, root / "index")
         conservative_bounds(binary, root / "bounds")
+        packed_bounds(binary, root / "packed-bounds")
         bounded_memory(binary, root / "large")
         indexed_memory(binary, root / "index-memory")
         if options.stress:

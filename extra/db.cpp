@@ -4,12 +4,15 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <new>
 #include <numeric>
 #include <type_traits>
 #include <utility>
+
+#include <sys/resource.h>
 
 #if defined(__x86_64__)
 #include <immintrin.h>
@@ -20,6 +23,7 @@ namespace {
 
 constexpr size_t missing = std::numeric_limits<size_t>::max();
 constexpr size_t index_budget = 4 * 1024 * 1024;
+constexpr size_t bound_budget = 2 * 1024 * 1024;
 constexpr uint32_t wide_row = 8 * 1024;
 
 struct RowRef {
@@ -172,6 +176,41 @@ struct ProjectionEntry {
   RowRef row;
 };
 
+struct BoundRow {
+  int64_t key;
+  RowRef row;
+  int32_t biased_norm;
+};
+
+struct BoundGroups {
+  struct Bucket { uint64_t tag; size_t offset; size_t count; };
+  size_t column = missing;
+  size_t used = 0;
+  std::array<Bucket, 32> buckets{};
+  std::vector<uint16_t> slots;
+
+  size_t bytes() const { return sizeof(*this) + slots.capacity() * sizeof(uint16_t); }
+  std::span<const uint16_t> lookup(uint64_t tag) const {
+    for (const auto& bucket : std::span(buckets).first(used)) {
+      if (bucket.tag == tag) return std::span(slots).subspan(bucket.offset, bucket.count);
+    }
+    return {};
+  }
+};
+
+struct BoundCache {
+  size_t stride = 0;
+  double inverse_step = 0;
+  std::vector<BoundRow> rows;
+  std::vector<int8_t> codes;
+  bool groups_attempted = false;
+  std::unique_ptr<BoundGroups> groups;
+
+  size_t bytes() const {
+    return rows.capacity() * sizeof(BoundRow) + codes.capacity() + (groups ? groups->bytes() : 0);
+  }
+};
+
 }  // namespace
 
 struct Table {
@@ -187,6 +226,8 @@ struct Table {
   std::string index_name;
   bool index_current = false;
   std::vector<ProjectionEntry> index;
+  bool bounds_attempted = false;
+  std::unique_ptr<BoundCache> bounds;
 
   Table(uint32_t id, std::string name, std::vector<Column> columns)
       : id(id), name(std::move(name)), columns(std::move(columns)) {
@@ -456,6 +497,133 @@ double avx2_lower_square(const char* vector, const float* query, size_t dimensio
   return std::max(0.0, approximate * (1.0 - allowance) -
                        dimension * double{std::numeric_limits<float>::min()});
 }
+
+uint64_t filter_tag(const Cell& value) {
+  if (const auto* number = std::get_if<int64_t>(&value)) return static_cast<uint64_t>(*number);
+  return std::hash<std::string_view>{}(std::get<std::string_view>(value));
+}
+
+std::unique_ptr<BoundGroups> group_slots(Log& log, const Table& table, size_t column, size_t budget) {
+  const auto& rows = table.bounds->rows;
+  const size_t count = rows.size();
+  if (count > std::numeric_limits<uint16_t>::max() ||
+      sizeof(BoundGroups) + count * (sizeof(uint16_t) + sizeof(uint8_t)) > budget) return {};
+  auto groups = std::make_unique<BoundGroups>();
+  groups->column = column;
+  std::vector<uint8_t> labels;
+  labels.reserve(count);
+  for (const auto& entry : rows) {
+    // Avoid reading unrelated wide payloads to build an optional shortcut.
+    if (entry.row.length > wide_row) return {};
+    Reader reader(payload(log, entry.row).substr(table.vector_bytes));
+    for (size_t field : table.layout) {
+      if (field == table.vector) continue;
+      const auto value = read_cell(reader, table.columns[field]);
+      if (field != column) continue;
+      const uint64_t tag = filter_tag(value);
+      size_t bucket = 0;
+      while (bucket < groups->used && groups->buckets[bucket].tag != tag) ++bucket;
+      if (bucket == groups->used) {
+        if (bucket == groups->buckets.size()) return {};
+        groups->buckets[groups->used++].tag = tag;
+      }
+      ++groups->buckets[bucket].count;
+      labels.push_back(static_cast<uint8_t>(bucket));
+      break;
+    }
+  }
+  if (labels.size() != count) return {};
+  size_t offset = 0;
+  for (auto& bucket : std::span(groups->buckets).first(groups->used)) {
+    bucket.offset = offset;
+    offset += bucket.count;
+    bucket.count = 0;
+  }
+  groups->slots.resize(count);
+  for (size_t i = 0; i < labels.size(); ++i) {
+    auto& bucket = groups->buckets[labels[i]];
+    groups->slots[bucket.offset + bucket.count++] = static_cast<uint16_t>(i);
+  }
+  return groups;
+}
+
+struct BoundQuery {
+  std::array<uint8_t, 4096> codes;
+  int32_t norm = 0;
+};
+
+int quantize(double value) {
+  return static_cast<int>(value + std::copysign(0.5, value));
+}
+
+bool make_bound_query(const BoundCache& cache, const std::vector<float>& query,
+                      BoundQuery& packed) {
+  for (size_t i = 0; i < query.size(); ++i) {
+    const double scaled = query[i] * (cache.inverse_step * 0.5);
+    // Query codes use twice the row step, so unsigned dot-product inputs
+    // fit in 0..126 and each AVX2 pair sum fits in a signed 16-bit lane.
+    if (std::abs(scaled) > 63.5) return false;
+    const int code = std::clamp(quantize(scaled), -63, 63);
+    packed.codes[i] = static_cast<uint8_t>(code + 63);
+    packed.norm += 4 * code * code;
+  }
+  std::fill(packed.codes.begin() + query.size(), packed.codes.begin() + cache.stride, 63);
+  return true;
+}
+
+int32_t bound_cutoff(double worst, double margin, size_t dimension, double inverse_step) {
+  // Both quantizers round to nearest, up to the error of the double scale.
+  // In row-code units the two per-component errors sum to less than 1.51.
+  // The triangle inequality makes this a necessary condition for entry into
+  // the heap. Round the squared cutoff up and retain equality for exact ties.
+  const double radius = std::sqrt(worst) * (1.0 + margin) * inverse_step +
+                        1.51 * std::sqrt(static_cast<double>(dimension));
+  const double square = radius * radius;
+  const auto maximum = std::numeric_limits<int32_t>::max();
+  return square >= maximum ? maximum : static_cast<int32_t>(std::ceil(square));
+}
+
+template <size_t FixedStride, bool Grouped, typename Probe>
+__attribute__((target("avx2")))
+void scan_bounds(const BoundCache& cache, const BoundQuery& query,
+                 const KeyRange& range, std::span<const uint16_t> slots, Probe probe) {
+  size_t start;
+  size_t end;
+  if constexpr (Grouped) {
+    if (slots.empty()) return;
+    const auto key_at = [&](uint16_t slot) { return cache.rows[slot].key; };
+    start = std::ranges::lower_bound(slots, range.low, {}, key_at) - slots.begin();
+    end = slots.size();
+  } else {
+    start = std::ranges::lower_bound(cache.rows, range.low, {}, &BoundRow::key) - cache.rows.begin();
+    end = cache.rows.size();
+  }
+  const size_t stride = FixedStride ? FixedStride : cache.stride;
+  const auto maximum = std::numeric_limits<int32_t>::max();
+  int32_t cutoff = maximum;
+  const __m256i ones = _mm256_set1_epi16(1);
+  for (; start < end; ++start) {
+    const size_t slot = Grouped ? slots[start] : start;
+    const auto& row = cache.rows[slot];
+    if (row.key > range.high) break;
+    if (cutoff != maximum) {
+      const auto* code = cache.codes.data() + slot * stride;
+      __m256i sum = _mm256_setzero_si256();
+      for (size_t at = 0; at < stride; at += 32) {
+        __m256i x, y;
+        std::memcpy(&x, code + at, sizeof(x));
+        std::memcpy(&y, query.codes.data() + at, sizeof(y));
+        sum = _mm256_add_epi32(sum, _mm256_madd_epi16(_mm256_maddubs_epi16(y, x), ones));
+      }
+      alignas(32) int32_t lanes[8];
+      _mm256_store_si256(reinterpret_cast<__m256i*>(lanes), sum);
+      const int32_t dot = std::accumulate(std::begin(lanes), std::end(lanes), int32_t{0});
+      // Recenter the unsigned query via the bias stored in the row norm.
+      if (row.biased_norm + query.norm - 4 * dot > cutoff) continue;
+    }
+    cutoff = probe(row, cutoff);
+  }
+}
 #endif
 
 double squared_distance(std::string_view vector, const std::vector<float>& query) {
@@ -690,6 +858,69 @@ void Database::invalidate_index(Table& current) {
   current.index_current = false;
   index_bytes_ -= current.index.capacity() * sizeof(ProjectionEntry);
   std::vector<ProjectionEntry>().swap(current.index);
+  current.bounds_attempted = false;
+  if (current.bounds) {
+    bound_bytes_ -= current.bounds->bytes();
+    current.bounds.reset();
+  }
+}
+
+void Database::prepare_bounds(Table& current) {
+#if defined(__x86_64__)
+  if (current.bounds_attempted) return;
+  current.bounds_attempted = true;
+  const size_t dimension = current.vector_bytes / sizeof(float);
+  const size_t stride = (dimension + 31) & ~size_t{31};
+  const size_t count = current.rows.size();
+  const size_t budget = bound_budget - bound_bytes_;
+  if (dimension < 32 || dimension > 4096 || count < 512 ||
+      count > budget / (stride + sizeof(BoundRow))) return;
+  struct rlimit limit {};
+  if (::getrlimit(RLIMIT_AS, &limit) == 0 && limit.rlim_cur < 64 * 1024 * 1024) return;
+
+  log_.prepare_reads();
+  const auto vector = [&](RowRef row) {
+    return log_.read(row.offset + Frame::header_size, current.vector_bytes);
+  };
+  double largest = 0;
+  for (const auto& entry : current.rows) {
+    const auto bytes = vector(entry.second);
+    for (size_t i = 0; i < dimension; ++i) {
+      const auto value = load<float>(bytes.substr(i * sizeof(float), sizeof(float)));
+      if (!std::isfinite(value)) return;
+      largest = std::max(largest, std::abs(double{value}));
+    }
+  }
+  if (largest == 0) return;
+
+  std::unique_ptr<BoundCache> cache;
+  try {
+    cache = std::make_unique<BoundCache>();
+    cache->rows.reserve(count);
+    cache->codes.resize(count * stride);
+  } catch (const std::bad_alloc&) {
+    return;
+  }
+  if (cache->bytes() > budget) return;
+  cache->stride = stride;
+  cache->inverse_step = 126.0 / largest;
+  for (const auto& [key, row] : current.rows) {
+    const auto bytes = vector(row);
+    int32_t norm = 0;
+    auto* out = cache->codes.data() + cache->rows.size() * stride;
+    for (size_t i = 0; i < dimension; ++i) {
+      const auto value = load<float>(bytes.substr(i * sizeof(float), sizeof(float)));
+      const int code = quantize(value * cache->inverse_step);
+      out[i] = static_cast<int8_t>(code);
+      norm += code * (code + 4 * 63);
+    }
+    cache->rows.push_back({key, row, norm});
+  }
+  bound_bytes_ += cache->bytes();
+  current.bounds = std::move(cache);
+#else
+  (void)current;
+#endif
 }
 
 void Database::build_index(Table& current) {
@@ -743,6 +974,8 @@ uint64_t Database::write(const CreateIndex& statement) {
     throw SqlError("SCHEMA", "index column must be VECTOR");
   }
   if (!current.index_name.empty()) throw SqlError("INDEX_EXISTS", "vector index already exists");
+  // Map the committed prefix before the index definition enters the write buffer.
+  log_.prepare_reads();
   apply(log_.append(Op::index, current.id, 0, 0, statement.name));
   build_index(current);
   return 0;
@@ -1113,7 +1346,54 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
     if (mode == SearchMode::ann && bounded && !descending && !current.index_name.empty()) {
       build_index(current);
     }
-    if (mode == SearchMode::ann && bounded && !descending && !current.index.empty()) {
+    bool used_bounds = false;
+#if defined(__x86_64__)
+    if (mode == SearchMode::exact && float_bound && limit <= 64 && first != last && !transaction_) {
+      prepare_bounds(current);
+      BoundQuery packed;
+      if (current.bounds && make_bound_query(*current.bounds, queries[query], packed)) {
+        double previous_worst = -1;
+        const auto visit = [&](const BoundRow& entry, int32_t cutoff) {
+          probe(entry.key, entry.row);
+          if (nearest.size() == limit && nearest.front().squared != previous_worst) {
+            previous_worst = nearest.front().squared;
+            return bound_cutoff(previous_worst, margin, queries[query].size(),
+                                current.bounds->inverse_step);
+          }
+          return cutoff;
+        };
+        auto& cache = *current.bounds;
+        const Filter* equality = filters.size() == 1 && filters.front().comparison == Comparison::eq
+            ? &filters.front() : nullptr;
+        if (equality && !cache.groups_attempted) {
+          cache.groups_attempted = true;
+          const size_t budget = bound_budget - bound_bytes_;
+          try {
+            auto groups = group_slots(log_, current, equality->column, budget);
+            if (groups && groups->bytes() <= budget) {
+              bound_bytes_ += groups->bytes();
+              cache.groups = std::move(groups);
+            }
+          } catch (const std::bad_alloc&) {
+            // The bounded scan needs no filter index.
+          }
+        }
+        if (equality && cache.groups && cache.groups->column == equality->column) {
+          // Equal values always share a bucket; the ordinary predicate check
+          // in probe still rejects collisions before admitting any neighbor.
+          const auto slots = cache.groups->lookup(filter_tag(equality->value));
+          if (cache.stride == 128) scan_bounds<128, true>(cache, packed, range, slots, visit);
+          else scan_bounds<0, true>(cache, packed, range, slots, visit);
+        } else if (cache.stride == 128) {
+          scan_bounds<128, false>(cache, packed, range, {}, visit);
+        } else {
+          scan_bounds<0, false>(cache, packed, range, {}, visit);
+        }
+        used_bounds = true;
+      }
+    }
+#endif
+    if (!used_bounds && mode == SearchMode::ann && bounded && !descending && !current.index.empty()) {
       // A first-coordinate projection bounds the full L2 distance from
       // below. Walk outward in order of that bound and visit ties before
       // stopping so exact and indexed searches agree on primary-key order.
@@ -1135,7 +1415,7 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
         const auto& entry = left_delta < right_delta ? current.index[--left] : current.index[right++];
         if (range.contains(entry.key)) probe(entry.key, entry.row);
       }
-    } else {
+    } else if (!used_bounds) {
       for (auto row = first; row != last; ++row) probe(row->first, row->second);
     }
     std::sort(nearest.begin(), nearest.end(), better);

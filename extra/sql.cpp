@@ -4,6 +4,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <utility>
 
@@ -118,6 +119,18 @@ class Lexer {
   }
 
   Token quoted(char delimiter) {
+    const auto close = sql_.find(delimiter, position_);
+    if (close == sql_.npos) syntax("unterminated quoted value");
+    const auto plain = sql_.substr(position_, close - position_);
+    if ((close + 1 == sql_.size() || sql_[close + 1] != delimiter) &&
+        (delimiter != '\'' || plain.find('\\') == plain.npos)) {
+      position_ = close + 1;
+      if (delimiter == '\'') return {TokenKind::string, std::string(plain)};
+      if (plain.empty()) syntax("empty identifier");
+      std::string identifier(plain);
+      lowercase(identifier);
+      return {TokenKind::identifier, std::move(identifier)};
+    }
     std::string value;
     while (position_ < sql_.size()) {
       char ch = sql_[position_++];
@@ -389,7 +402,17 @@ class Parser {
 
 size_t utf8_length(std::string_view value) {
   size_t characters = 0;
-  for (size_t i = 0; i < value.size(); ++characters) {
+  for (size_t i = 0; i < value.size();) {
+    if (value.size() - i >= sizeof(uint64_t)) {
+      uint64_t bytes;
+      std::memcpy(&bytes, value.data() + i, sizeof(bytes));
+      if ((bytes & 0x8080808080808080ull) == 0) {
+        i += sizeof(bytes);
+        characters += sizeof(bytes);
+        continue;
+      }
+    }
+    ++characters;
     const auto first = static_cast<unsigned char>(value[i++]);
     if (first <= 0x7f) continue;
     unsigned count = 0;
@@ -452,26 +475,28 @@ std::vector<float> vector_value(const Literal& value, uint32_t dimension) {
   if (!consume(']')) {
     do {
       while (pos < text.size() && space(text[pos])) ++pos;
-      const size_t end = number_end(text, pos);
-      if (end == pos) throw SqlError("VALUE", "invalid vector component");
       // strtof handles rounding at the float32 subnormal boundary, including
       // finite zero, when from_chars reports an out-of-range value.
       float component = 0;
       const char* first = text.data() + pos;
-      const char* last = text.data() + end;
-      if (*first == '+') ++first;
-      const auto converted = std::from_chars(first, last, component);
+      const char* last = text.data() + text.size();
+      const char* start = first;
+      if (start != last && (*start == '+' || *start == '-')) ++start;
+      if (start == last || (!digit(*start) && *start != '.')) {
+        throw SqlError("VALUE", "invalid vector component");
+      }
+      const auto converted = std::from_chars(*first == '+' ? first + 1 : first, last, component);
       if (converted.ec == std::errc::result_out_of_range) {
         char* tail = nullptr;
-        component = std::strtof(text.data() + pos, &tail);
-        if (tail != last) throw SqlError("VALUE", "invalid vector component");
-      } else if (converted.ec != std::errc{} || converted.ptr != last) {
+        component = std::strtof(first, &tail);
+        if (tail != converted.ptr) throw SqlError("VALUE", "invalid vector component");
+      } else if (converted.ec != std::errc{}) {
         throw SqlError("VALUE", "invalid vector component");
       }
       if (!std::isfinite(component)) throw SqlError("VALUE", "nonfinite float32 component");
       if (count < dimension) result.push_back(component);
       ++count;
-      pos = end;
+      pos = converted.ptr - text.data();
     } while (consume(','));
     if (!consume(']')) throw SqlError("VALUE", "invalid vector syntax");
   }
