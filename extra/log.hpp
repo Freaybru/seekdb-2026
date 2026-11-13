@@ -49,7 +49,7 @@ class Reader {
 
 void store_text(std::string& bytes, std::string_view value);
 
-enum class Op : uint32_t { create = 1, index, put, erase, commit };
+enum class Op : uint32_t { create = 1, index, put, erase, commit, packed_put };
 struct Frame {
   static constexpr uint32_t header_size = 28;
   uint64_t offset;
@@ -71,6 +71,7 @@ class Log {
 
   static constexpr uint64_t start = 8;
   uint64_t end() const { return disk_end_ + pending_.size(); }
+  bool supports_packed_rows() const { return packed_rows_; }
   Frame append(Op op, uint32_t table = 0, int64_t key = 0,
                uint64_t previous = 0, std::string_view payload = {});
   void commit();
@@ -90,6 +91,7 @@ class Log {
   void write_disk(uint64_t offset, std::string_view data);
 
   int fd_ = -1;
+  bool packed_rows_ = false;
   uint64_t disk_end_ = 0;
   std::string pending_;
   uint64_t block_start_ = 0;

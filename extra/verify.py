@@ -13,6 +13,7 @@ import resource
 import select
 import shutil
 import signal
+import struct
 import subprocess
 from tempfile import TemporaryDirectory
 import termios
@@ -340,6 +341,81 @@ def vector_syntax(binary, root):
         assert float(db.query("SELECT L2_DISTANCE(v,'[.5,1,0]') FROM `vec``test`")[0][0]) == 0
         db.quit()
     print("Quoted SQL, decimal and exponent syntax, and invalid float32 writes: passed")
+
+
+def packed_storage(binary, root):
+    # 129 coordinates exercise the partial SIMD block. Include sign bits,
+    # exponent escapes, and values in the same row that must remain raw.
+    size = 129
+    short = [0.0, -0.0, 1.5, -0.25, 5.0] * 25 + [0.0, -0.0, 0.25, 1.0]
+    clustered = list(array('f', (0.91 + 0.00037 * i for i in range(size))))
+    clustered[0], clustered[1], clustered[-1] = 2.0**-149, -0.0, -2.0**-90
+    raw = list(array('f', ((-1)**i * (1.0001 + i / 10000) * 2**(-100 if i % 2 else 100)
+                            for i in range(size))))
+    values = {1: short, 2: clustered, 3: raw}
+    labels = {1: '甲', 2: '乙', 3: '丙'}
+
+    def binary32(value):
+        return array('f', value).tobytes()
+
+    def check_rows(db):
+        result = db.query('SELECT id,v,body,tag FROM t ORDER BY body, id')
+        assert [int(row[0]) for row in result] == sorted(values, key=lambda key: labels[key])
+        for key, vector, body, tag in result:
+            key = int(key)
+            assert binary32(json.loads(vector, parse_int=float)) == binary32(values[key]), key
+            assert body == labels[key] and int(tag) == key % 2
+
+    for legacy in (True, False):
+        folder = root / ('legacy' if legacy else 'current')
+        folder.mkdir(parents=True)
+        log = folder / 'minivectordb.log'
+        if legacy:
+            log.write_bytes(b'MINIVDB1')
+        with Session(binary, folder) as db:
+            db.ok(f'CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR({size}), body VARCHAR(8), tag BIGINT)')
+            db.ok('INSERT INTO t VALUES '+','.join(f"({key},'{json.dumps(v)}','{labels[key]}',{key%2})"
+                                                  for key,v in values.items()),3)
+            check_rows(db)
+            before = log.stat().st_size
+            db.ok('UPDATE t SET body=\'乙\' WHERE id=2',1)
+            assert before == log.stat().st_size
+            db.ok('CREATE VECTOR INDEX ix ON t(v)')
+            query = f"SELECT id FROM t WHERE tag=0 ORDER BY L2_DISTANCE(v,'{json.dumps(clustered)}') LIMIT 1"
+            assert db.query(query)==[['2']]
+            db.ok('MODE ann')
+            assert db.query(query)==[['2']]
+            db.ok('BEGIN')
+            db.ok(f"UPDATE t SET v='{json.dumps(raw)}' WHERE id=1",1)
+            db.ok('DELETE FROM t WHERE id=2',1)
+            db.ok('ROLLBACK')
+            check_rows(db)
+            db.ok('BEGIN')
+            db.ok(f"INSERT INTO t VALUES (4,'{json.dumps(clustered)}','未提交',0)",1)
+            db.kill()
+        with Session(binary, folder) as db:
+            check_rows(db)
+            db.ok('MODE ann')
+            assert db.query(query)==[['2']]
+            db.quit()
+        data = log.read_bytes()
+        assert data[:8] == (b'MINIVDB1' if legacy else b'MINIVDB2')
+        records = {}
+        cursor = 8
+        while cursor < len(data):
+            length, op, _, key, _ = struct.unpack_from('<IIIqQ',data,cursor)
+            if op in (3,6):
+                records[key] = (op, length, data[cursor + 28:cursor + 30])
+            cursor += length + 32
+        assert cursor == len(data)
+        assert set(records) == {1,2,3}
+        if legacy:
+            assert all(op==3 for op,_,_ in records.values())
+        else:
+            assert records[1][0]==6 and int.from_bytes(records[1][2],'little') & 0x8000
+            assert records[2][0]==6 and not int.from_bytes(records[2][2],'little') & 0x8000
+            assert records[3][0]==3
+    print('Lossless float32 storage: two encodings, raw and v1 fallback, indexed filters, rollback and crash recovery passed')
 
 
 def script_input(binary, root):
@@ -906,6 +982,7 @@ def main():
         json_wire(binary, root / "json")
         vector_syntax(binary, root / "vector-syntax")
         functional(binary, root / "sql")
+        packed_storage(binary, root / "packed-storage")
         script_input(binary, root / "framing")
         paged_mutations(binary, root / "directory")
         atomicity(binary, root / "atomic")

@@ -16,8 +16,9 @@
 namespace mini {
 namespace {
 
-constexpr std::string_view magic = "MINIVDB1";
-static_assert(magic.size() == Log::start);
+constexpr std::string_view legacy_magic = "MINIVDB1";
+constexpr std::string_view magic = "MINIVDB2";
+static_assert(magic.size() == Log::start && legacy_magic.size() == Log::start);
 constexpr uint32_t header_size = Frame::header_size;
 constexpr uint32_t frame_overhead = header_size + sizeof(uint32_t);
 constexpr uint64_t read_page = 4 * 1024;
@@ -61,6 +62,7 @@ Log::Log(const std::filesystem::path& directory) {
     if (disk_end_ < start) {
       // No frame can exist if initialization was interrupted here.
       write_disk(0, magic);
+      packed_rows_ = true;
       disk_end_ = start;
       sync_file(fd_);
       const int dir = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -72,8 +74,10 @@ Log::Log(const std::filesystem::path& directory) {
       const int error = errno;
       ::close(dir);
       if (result < 0) throw std::system_error(error, std::generic_category(), "sync data directory");
-    } else if (read(0, start) != magic) {
-      throw std::runtime_error("unknown log format");
+    } else {
+      const auto version = read(0, start);
+      packed_rows_ = version == magic;
+      if (!packed_rows_ && version != legacy_magic) throw std::runtime_error("unknown log format");
     }
   } catch (...) {
     ::close(fd_);
@@ -243,7 +247,7 @@ std::optional<Frame> Log::frame_at(uint64_t offset, uint64_t limit) {
                     input.read<uint64_t>()};
   if (length > limit - offset - frame_overhead ||
       length > std::numeric_limits<uint32_t>::max() - frame_overhead ||
-      op < Op::create || op > Op::commit ||
+      op < Op::create || op > (packed_rows_ ? Op::packed_put : Op::commit) ||
       (op == Op::commit && (length || frame.table || frame.key || frame.previous)) ||
       load<uint32_t>(read(frame.end() - sizeof(uint32_t), sizeof(uint32_t))) !=
           length + frame_overhead) {
