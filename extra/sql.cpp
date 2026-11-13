@@ -54,7 +54,9 @@ void lowercase(std::string& value) {
 enum class TokenKind { end, word, identifier, number, string, vector, symbol };
 struct Token {
   TokenKind kind;
-  std::string value;
+  SqlText value;
+
+  std::string_view text() const { return text_view(value); }
 };
 
 class Lexer {
@@ -80,12 +82,12 @@ class Lexer {
       const size_t close = sql_.find(']', position_);
       if (close == sql_.npos) syntax("unterminated vector");
       position_ = close + 1;
-      return {TokenKind::vector, std::string(sql_.substr(start, position_ - start))};
+      return {TokenKind::vector, sql_.substr(start, position_ - start)};
     }
     if (digit(ch) || ch == '+' || ch == '-' || ch == '.') {
       position_ = number_end(sql_, start);
       if (position_ != start) {
-        return {TokenKind::number, std::string(sql_.substr(start, position_ - start))};
+        return {TokenKind::number, sql_.substr(start, position_ - start)};
       }
       position_ = start + 1;
     }
@@ -93,7 +95,7 @@ class Lexer {
       if ((ch == '<' || ch == '>') && position_ < sql_.size() && sql_[position_] == '=') {
         ++position_;
       }
-      return {TokenKind::symbol, std::string(sql_.substr(start, position_ - start))};
+      return {TokenKind::symbol, sql_.substr(start, position_ - start)};
     }
     syntax("unexpected token");
   }
@@ -125,7 +127,7 @@ class Lexer {
     if ((close + 1 == sql_.size() || sql_[close + 1] != delimiter) &&
         (delimiter != '\'' || plain.find('\\') == plain.npos)) {
       position_ = close + 1;
-      if (delimiter == '\'') return {TokenKind::string, std::string(plain)};
+      if (delimiter == '\'') return {TokenKind::string, plain};
       if (plain.empty()) syntax("empty identifier");
       std::string identifier(plain);
       lowercase(identifier);
@@ -185,7 +187,7 @@ class Parser {
 
   bool accept(std::string_view word) {
     if ((token_.kind != TokenKind::word && token_.kind != TokenKind::symbol) ||
-        token_.value != word) {
+        token_.text() != word) {
       return false;
     }
     take();
@@ -200,12 +202,13 @@ class Parser {
     if (token_.kind != TokenKind::word && token_.kind != TokenKind::identifier) {
       syntax("expected identifier");
     }
-    return take().value;
+    auto token = take();
+    return std::get<std::string>(std::move(token.value));
   }
 
   uint64_t nonnegative() {
     uint64_t value = 0;
-    if (token_.kind != TokenKind::number || !integer_value(token_.value, value)) {
+    if (token_.kind != TokenKind::number || !integer_value(token_.text(), value)) {
       syntax("expected nonnegative integer");
     }
     take();
@@ -336,7 +339,7 @@ class Parser {
   }
 
   Expression expression() {
-    const bool distance = token_.kind == TokenKind::word && token_.value == "l2_distance";
+    const bool distance = token_.kind == TokenKind::word && token_.text() == "l2_distance";
     Expression result{identifier(), {}, {}};
     if (distance && accept("(")) {
       result.column = identifier();
@@ -445,7 +448,7 @@ Statement parse(std::string_view sql) { return Parser(sql).parse(); }
 
 int64_t bigint(const Literal& value) {
   int64_t result = 0;
-  if (value.kind != LiteralKind::number || !integer_value(value.text, result)) {
+  if (value.kind != LiteralKind::number || !integer_value(text_view(value.text), result)) {
     throw SqlError("VALUE", "invalid BIGINT");
   }
   return result;
@@ -453,12 +456,13 @@ int64_t bigint(const Literal& value) {
 
 std::string_view varchar(const Literal& value, uint32_t max_chars) {
   if (value.kind != LiteralKind::string) throw SqlError("VALUE", "expected a string");
-  if (utf8_length(value.text) > max_chars) throw SqlError("VALUE", "VARCHAR is too long");
-  return value.text;
+  const auto text = text_view(value.text);
+  if (utf8_length(text) > max_chars) throw SqlError("VALUE", "VARCHAR is too long");
+  return text;
 }
 
 std::vector<float> vector_value(const Literal& value, uint32_t dimension) {
-  const std::string_view text = value.text;
+  const std::string_view text = text_view(value.text);
   size_t pos = 0;
   const auto consume = [&](char ch) {
     while (pos < text.size() && space(text[pos])) ++pos;
@@ -487,9 +491,10 @@ std::vector<float> vector_value(const Literal& value, uint32_t dimension) {
       }
       const auto converted = std::from_chars(*first == '+' ? first + 1 : first, last, component);
       if (converted.ec == std::errc::result_out_of_range) {
+        const std::string token(first, converted.ptr);
         char* tail = nullptr;
-        component = std::strtof(first, &tail);
-        if (tail != converted.ptr) throw SqlError("VALUE", "invalid vector component");
+        component = std::strtof(token.c_str(), &tail);
+        if (tail != token.data() + token.size()) throw SqlError("VALUE", "invalid vector component");
       } else if (converted.ec != std::errc{}) {
         throw SqlError("VALUE", "invalid vector component");
       }

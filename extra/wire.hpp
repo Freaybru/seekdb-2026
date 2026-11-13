@@ -14,7 +14,7 @@ namespace mini::wire {
 struct Request {
   std::string_view id;
   std::string op;
-  std::optional<std::string> sql;
+  std::optional<SqlText> sql;
   std::string mode = "exact";
 };
 
@@ -42,11 +42,11 @@ class RequestReader {
         value(0);
         request.id = line_.substr(start, at_ - start);
       } else if (key == "op") {
-        request.op = string();
+        request.op = text_view(string());
       } else if (key == "sql") {
         request.sql = string();
       } else if (key == "search_mode") {
-        request.mode = string();
+        request.mode = text_view(string());
       } else {
         value(0);
       }
@@ -135,14 +135,14 @@ class RequestReader {
     return true;
   }
 
-  std::string string() {
+  SqlText string() {
     expect('"');
     const auto close = line_.find('"', at_);
     if (close == line_.npos) invalid("incomplete JSON");
     const auto plain = line_.substr(at_, close - at_);
     if (plain_string(plain)) {
       at_ = close + 1;
-      return std::string(plain);
+      return plain;
     }
     std::string result;
     for (char ch = next(); ch != '"'; ch = next()) {
@@ -200,9 +200,10 @@ class RequestReader {
     std::set<std::string> keys;
     do {
       auto key = string();
-      if (!keys.insert(key).second) invalid("duplicate JSON key");
+      const auto view = text_view(key);
+      if (!keys.emplace(view).second) invalid("duplicate JSON key");
       expect(':');
-      field(key);
+      field(view);
     } while (accept(','));
     expect('}');
   }

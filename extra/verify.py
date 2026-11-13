@@ -757,7 +757,7 @@ def packed_bounds(binary, root):
     for dimension, scale in ((33, 2.0**-143), (128, 1.0), (129, 1e35)):
         folder = root / str(dimension)
         values = {key: list(array("f", (rng.uniform(-scale, scale) for _ in range(dimension))))
-                  for key in range(-320, 320)}
+                  for key in range(-320, 323)}
         values[-305] = values[-304].copy()
         pairs = {key: units(vector) for key, vector in values.items()}
         queries = [values[-304], values[10], [0.0] * dimension,
@@ -766,9 +766,16 @@ def packed_bounds(binary, root):
         def check(db, state, retagged=False):
             for i, query in enumerate(queries):
                 q = units(query)
-                where = " WHERE id>=-310 AND id<=100 AND tag='组0'" if i == 1 else ""
-                eligible = (key for key in state if i != 1 or -310 <= key <= 100 and
-                            (key % 4 == 0 or retagged and key == 10))
+                if i == 1:
+                    where = " WHERE id>=-310 AND id<=100 AND tag='组0'"
+                    eligible = [key for key in state if -310 <= key <= 100 and
+                                (key % 4 == 0 or retagged and key == 10)]
+                elif i == 2:
+                    where = " WHERE id>=-310 AND id<=100"
+                    eligible = [key for key in state if -310 <= key <= 100]
+                else:
+                    where = ""
+                    eligible = state
                 top = sorted(eligible, key=lambda key:
                              (sum((a-b)**2 for a, b in zip(state[key], q)), key))[:10]
                 sql = f"SELECT id FROM t{where} ORDER BY L2_DISTANCE(v,'{json.dumps(query)}') LIMIT 10"
@@ -779,6 +786,11 @@ def packed_bounds(binary, root):
                             f"L2_DISTANCE(v,'{json.dumps(queries[0])}') LIMIT 5") == []
             assert db.query(f"SELECT id FROM t WHERE id>10 AND id<12 AND tag='组0' ORDER BY "
                             f"L2_DISTANCE(v,'{json.dumps(queries[0])}') LIMIT 5") == []
+            q = units(queries[1])
+            expected = min((key for key in state if 10 <= key <= 12),
+                           key=lambda key: (sum((a-b)**2 for a, b in zip(state[key], q)), key))
+            assert db.query(f"SELECT id FROM t WHERE marker>=11 AND marker<=13 ORDER BY "
+                            f"L2_DISTANCE(v,'{json.dumps(queries[1])}') LIMIT 1") == [[str(expected)]]
 
         with Session(binary, folder) as db:
             db.ok(f"CREATE TABLE t (id BIGINT PRIMARY KEY, tag VARCHAR(8), marker BIGINT, v VECTOR({dimension}))")
@@ -807,6 +819,9 @@ def packed_bounds(binary, root):
             check(db, pairs, retagged=True)
             db.ok(f"UPDATE t SET v='{zero}' WHERE id=10", 1)
             pairs[10] = [0] * dimension
+            check(db, pairs, retagged=True)
+            db.ok(f"INSERT INTO t VALUES (640,'组0',641,'{zero}')", 1)
+            pairs[640] = [0] * dimension
             check(db, pairs, retagged=True)
             db.quit()
         with Session(binary, folder) as db:

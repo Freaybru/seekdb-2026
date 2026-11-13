@@ -24,9 +24,16 @@ struct Column {
 };
 
 enum class LiteralKind { number, string, vector };
+using SqlText = std::variant<std::string_view, std::string>;
+
+inline std::string_view text_view(const SqlText& text) {
+  if (const auto* view = std::get_if<std::string_view>(&text)) return *view;
+  return std::get<std::string>(text);
+}
+
 struct Literal {
   LiteralKind kind;
-  std::string text;
+  SqlText text;
 };
 
 enum class Comparison { eq, lt, le, gt, ge };
@@ -69,6 +76,7 @@ struct Delete { std::string table; std::vector<Predicate> filter; };
 enum class Transaction { begin, commit, rollback };
 using Statement = std::variant<CreateTable, CreateIndex, Insert, Select, Update, Delete, Transaction>;
 
+// Unescaped literals borrow sql, which must outlive execution of the statement.
 Statement parse(std::string_view sql);
 size_t utf8_length(std::string_view value);
 int64_t bigint(const Literal& value);

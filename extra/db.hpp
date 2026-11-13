@@ -38,7 +38,7 @@ class Database {
   void undo(uint64_t target, uint64_t cursor);
   void invalidate_index(Table& table);
   void build_index(Table& table);
-  void prepare_bounds(Table& table);
+  void prepare_bounds(Table& table, std::optional<size_t> equality_column);
 
   uint64_t write(const CreateTable& statement);
   uint64_t write(const CreateIndex& statement);

@@ -252,7 +252,7 @@ void serve_json(mini::Database& db) {
       }
       if (request.op != "execute") throw mini::SqlError("unsupported_op", "expected execute or shutdown");
       if (!request.sql) mini::wire::invalid("execute needs a sql string");
-      db.execute(mini::parse(*request.sql), mode_value(request.mode), protocol);
+      db.execute(mini::parse(mini::text_view(*request.sql)), mode_value(request.mode), protocol);
     } catch (const mini::SqlError& error) {
       JsonProtocol(id).error(error);
     }
