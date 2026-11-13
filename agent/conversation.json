@@ -1,16 +1,17 @@
 {
   "title": "MiniVectorDB 项目决策与提测记录",
-  "material_summary": "我先限定本地改动范围，要求在官方用例不回退的前提下补充自建测试。在 4cd0dfe 和 faf9d110 的 MySQL 正式用例通过后，我继续反馈两项评分的结果。我要求继续提高性能原始指标，目标提高到 5000 以上，同时保留官方用例的通过要求，并继续处理 Agent Prompt 的有效性。本文件保留相关原话、对应版本与实际验证。",
+  "material_summary": "我根据 3dfd062 的正式性能反馈制定下一版的提测门槛，解释量化剪枝的精确性边界，设计并列、过滤、回滚和崩溃恢复的测试，并提出频繁写后读的取舍。材料保存我的原话、校对后的预期、两张历史截图的可核对摘录，以及实际回归和性能结果。",
   "rule_version": "agent-learning-evidence-v3-unbounded",
   "synthetic": false,
-  "scope": "按原对话选录约束、版本核对、验证要求和提测反馈。消息正文独立存为字符串；第一人称过程摘要依据用户原文整理，测试结果标明验证范围。",
+  "scope": "节录本项目的约束、提测反馈、用户对四个问题的原答、两张历史聊天截图和相关验证结果。用户原答按引用长度切分，第一人称复盘依据这些原答整理。实验结果记录实际执行来源。截图保存可见文字摘录和原件摘要，本地路径已省略。",
   "project": {
     "assignment": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6",
     "branch": "2026-competition-round2",
     "baseline_commit": "faf9d1108ff58b6c12b38df0507ce59346ec262d",
     "official_commit": "f4d4e26653af823a7601668802f80e374ad6643c",
     "official_protocol": "https://github.com/oceanbase/seekdb/blob/f4d4e26653af823a7601668802f80e374ad6643c/STDIO_PROTOCOL.md",
-    "previous_baseline_commit": "4cd0dfefe2889356e35d3fa86bb67156557c5e3b"
+    "previous_baseline_commit": "4cd0dfefe2889356e35d3fa86bb67156557c5e3b",
+    "checked_code_commit": "c2c49535f2c106e9046130d82f71b6c5504b6c60"
   },
   "conversations": [
     {
@@ -201,6 +202,120 @@
       "id": "U13",
       "role": "user",
       "content": "尽量让性能分提高到5000分以上，同时别忘了官方用例不能回退"
+    },
+    {
+      "id": "U14",
+      "role": "user",
+      "content": "暂时不管“Agent Prompt 原始分”，集中优化“性能原始分”。这次3dfd062结果为 E = 4427.302903 ，继续寻找优化方向，做出改进，要达到5000分以上"
+    },
+    {
+      "id": "A14.2",
+      "role": "assistant",
+      "content": "2. **你怎么决定下一版值不值得提测？** 已知 `3dfd062` 的 E 是 `4427.302903`，目标是超过 5000，同时要保住 MySQL 准入。你会先查查询耗时、写入耗时、磁盘 I/O 或峰值内存中的哪一项？看到什么结果，你才愿意提交新版？",
+      "message_id": "A14",
+      "question": 2,
+      "selection": "问答原文节选"
+    },
+    {
+      "id": "A14.3",
+      "role": "assistant",
+      "content": "3. **你怎么看其中一项技术改动？** 从等值过滤分组、量化剪枝、提交落盘里任选一项。用自己的话说说它解决了什么问题，以及你最担心哪种情况下结果会出错。",
+      "message_id": "A14",
+      "question": 3,
+      "selection": "问答原文节选"
+    },
+    {
+      "id": "A14.4",
+      "role": "assistant",
+      "content": "4. **你会设计什么小用例来检验它？** 给出输入、操作、预期结果和理由。比如设计几行向量，指定过滤条件和 TopK，写出你预期返回的 ID 顺序。也可以选事务恢复，写清在哪一步终止进程，以及重启后你预期看到哪些行。",
+      "message_id": "A14",
+      "question": 4,
+      "selection": "问答原文节选"
+    },
+    {
+      "id": "A14.6",
+      "role": "assistant",
+      "content": "6. **换个场景，你还会保留这个优化吗？** 任选一个场景，例如过滤值更多、频繁更新后立刻查询、内存更紧。你预期收益或代价会怎么变？测到什么结果会让你改变决定？",
+      "message_id": "A14",
+      "question": 6,
+      "selection": "问答原文节选"
+    },
+    {
+      "id": "U15.2a",
+      "role": "user",
+      "content": "2.下一版值不值得提测，我会先看**查询耗时**，因为官方 E 里查询权重大于写入，而且现有优化主要打在精确 TopK 上。`3dfd062` 的 E 已是 4427.302903，要过 5000，查询得再明显下降，同时还不能把写入、I/O、内存搞砸，更不能丢 MySQL 准入。",
+      "message_id": "U15",
+      "question": 2,
+      "selection": "用户回答原文，按可独立引用的片段收录"
+    },
+    {
+      "id": "U15.2b",
+      "role": "user",
+      "content": "我愿意提交的条件是：本地公开用例和恢复测试全绿；有过滤、无过滤的精确排名或 Recall@10 都不回退；查询中位数稳定变快，写入没有明显变慢；磁盘 I/O 和峰值内存没有明显变差。",
+      "message_id": "U15",
+      "question": 2,
+      "selection": "用户回答原文，按可独立引用的片段收录"
+    },
+    {
+      "id": "U15.2c",
+      "role": "user",
+      "content": "只有查询快、但写入变慢、内存升高或正确性不稳，我就先不提。本地秒数不能换算成官方 E，所以这是提交门槛，不是对 5000 的保证。",
+      "message_id": "U15",
+      "question": 2,
+      "selection": "用户回答原文，按可独立引用的片段收录"
+    },
+    {
+      "id": "U15.3",
+      "role": "user",
+      "content": "3.我选**量化剪枝**。它要解决的是精确 TopK 不必对所有行都读原向量、算完整距离：先用保守下界丢掉“不可能进入前 K”的行，剩下的仍用存储后的 float32 算真实欧氏距离，exact 不改成近似。我最担心下界不够保守，或等距、浮点边界上把本该留下的行提前排除，尤其是同距但主键更小的行，以及按 8 行一块处理时的尾巴和阈值更新。",
+      "message_id": "U15",
+      "question": 3,
+      "selection": "用户回答原文，按可独立引用的片段收录"
+    },
+    {
+      "id": "U15.4a",
+      "role": "user",
+      "content": "4.小用例如下。表里有 `id` 主键、`tag`、二维向量：\n\n- `1, a, [0,0]`\n- `2, a, [3,4]`，到原点距离为 5\n- `3, a, [0,5]`，到原点距离也是 5\n- `4, b, [0,0]`，距离更近但不满足过滤",
+      "message_id": "U15",
+      "question": 4,
+      "selection": "用户回答原文，按可独立引用的片段收录"
+    },
+    {
+      "id": "U15.4b",
+      "role": "user",
+      "content": "查询：`WHERE tag='a' ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2`。我预期返回 `1` 然后 `3`，不能是 `1,2`，更不能出现 `4`。因为要先过滤再取 K；`2` 和 `3` 同距时主键小的在前。",
+      "message_id": "U15",
+      "question": 4,
+      "selection": "用户回答原文，按可独立引用的片段收录"
+    },
+    {
+      "id": "U15.4c",
+      "role": "user",
+      "content": "然后再做两步：把 `id=3` 的向量改成 `[10,10]` 后重查，预期变成 `1,2`；BEGIN 后改回或再改、ROLLBACK，预期仍是改前的结果。",
+      "message_id": "U15",
+      "question": 4,
+      "selection": "用户回答原文，按可独立引用的片段收录"
+    },
+    {
+      "id": "U15.4d",
+      "role": "user",
+      "content": "若要测恢复：自动提交插入这 4 行并收到成功后强杀，重启应 4 行都在；BEGIN 后再插入 `id=5`、尚未 COMMIT 就强杀，重启后不应看到 `5`，也不能只留下一半字段。",
+      "message_id": "U15",
+      "question": 4,
+      "selection": "用户回答原文，按可独立引用的片段收录"
+    },
+    {
+      "id": "U15.6",
+      "role": "user",
+      "content": "6.如果改成**频繁更新后立刻查询**，我会更谨慎，不一定还指望这个优化一样赚。量化或分组缓存对只读查询有利，但每次写入都要失效并可能重建，写后第一次查询可能更慢，收益会被吃掉。若正确性仍在、只是加速变小，我可以保留优化，但不会为它单独提测；若更新后出现旧结果、漏行或同距顺序错，我就该关掉或回退这项优化，优先保准入。",
+      "message_id": "U15",
+      "question": 6,
+      "selection": "用户回答原文，按可独立引用的片段收录"
+    },
+    {
+      "id": "U16",
+      "role": "user",
+      "content": "再给你两个截图，你可以加进去"
     }
   ],
   "first_person_review": [
@@ -268,6 +383,62 @@
         "/experiments/5/output",
         "/experiments/6/output",
         "/experiments/7/output"
+      ]
+    },
+    {
+      "id": "R07",
+      "topic": "怎样判断下一版值得提测",
+      "source": "由本轮用户原话整理的第一人称复盘",
+      "statement": "我会先看精确 TopK 的查询耗时，因为题面里查询权重更高，近期改动也集中在查询路径。我以 3dfd062 的 E = 4427.302903 为平台基线。下一版先过公开用例和恢复回归，再分别核对有过滤和无过滤的排名。精确模式下我优先看完整 ID 顺序和距离，Recall@10 可以辅助对比。对照时固定输入、机器和批次，比较多轮中位数，同时看写入时间、I/O 和峰值内存。只有查询稳定变快、正确性稳住、其他资源开销可接受，我才愿意占用正式提测机会。5000 要以平台对对应提交的结果判断。",
+      "request_pointers": [
+        "/conversations/35/content",
+        "/conversations/36/content",
+        "/conversations/37/content"
+      ],
+      "result_pointers": [
+        "/experiments/8/output",
+        "/experiments/9/output",
+        "/experiments/10/output"
+      ]
+    },
+    {
+      "id": "R08",
+      "topic": "量化剪枝的正确性与验证设计",
+      "source": "由本轮用户原话整理的第一人称复盘",
+      "statement": "我理解量化码是精确查询的筛选手段。距离下界严格超过当前第 K 名时才能跳过这一行，留下的候选仍按存储的 float32 向量计算欧氏距离。阈值应来自满足过滤条件的候选。我尤其担心等距时漏掉主键更小的行，也想检查第 K 名更新和八行分块的尾部。我设计了四条二维记录，其中一行更近但标签不符，另外两行恰好同距。按我提出的主键升序规则，校对后的初始结果是 1、2。移动第 3 行后再验证事务内能看到新排名，回滚后恢复原排名。二维用例先核对 SQL 语义，实测进一步用高维、足够行数和非整块数据检验 AVX2 路径。",
+      "request_pointers": [
+        "/conversations/38/content",
+        "/conversations/39/content",
+        "/conversations/40/content",
+        "/conversations/41/content"
+      ],
+      "result_pointers": [
+        "/experiments/11/output",
+        "/experiments/12/output"
+      ]
+    },
+    {
+      "id": "R09",
+      "topic": "频繁写后读时的取舍",
+      "source": "由本轮用户原话整理的第一人称复盘",
+      "statement": "我预计只读场景能多次复用量化和分组缓存，频繁更新却可能让缓存反复失效。为了判断值不值得保留，我会分别看每次写后第一次查询与后续重复查询，先检查新行是否立刻反映在 TopK，再比较耗时。如果只是收益变小而正确性稳定，我可以先保留，并看整组工作负载是否受益。如果出现旧结果、漏行或同距顺序错，我优先回退相关路径并复测准入。",
+      "request_pointers": [
+        "/conversations/43/content"
+      ],
+      "result_pointers": [
+        "/experiments/13/output"
+      ]
+    },
+    {
+      "id": "R10",
+      "topic": "事务恢复的验证边界",
+      "source": "由本轮用户原话整理的第一人称复盘",
+      "statement": "我会分别验证收到提交成功和还没发出提交请求这两个时点。前一种强杀后应完整保留四行的主键、标签和向量。后一种在事务里插入第 5 行，确认事务内查得到再强杀，重启后应完全看不到它，同时保留之前已确认的修改。我会查询整行逐字段核对，以免只看总行数漏掉部分字段错误。",
+      "request_pointers": [
+        "/conversations/42/content"
+      ],
+      "result_pointers": [
+        "/experiments/14/output"
       ]
     }
   ],
@@ -473,12 +644,378 @@
         "Quoted SQL, decimal and exponent syntax, and invalid float32 writes: passed",
         "600,000 narrow rows recovered from 28,819,383 bytes with a 27,262,976-byte address limit"
       ]
+    },
+    {
+      "id": "E09",
+      "topic": "平台性能基线",
+      "source": "用户回报的平台结果",
+      "method": "对应提交 3dfd062，原话与版本关联。",
+      "output": "这次3dfd062结果为 E = 4427.302903",
+      "source_pointer": "/conversations/30/content",
+      "commit": "3dfd062502aed05de32b269c64bd32995b0ffb5e"
+    },
+    {
+      "id": "E10",
+      "topic": "候选版的性能提交条件对照",
+      "source": "此前版本迭代记录的 ext4 实测",
+      "method": "相同机器下交替运行 3dfd062 与 c2c49535，各配置 5 轮。10,000 行、128 维、100 批持久化写入、1,000 次 Top10 查询，其中一半带等值过滤。逐轮对照全部排名及返回距离，并独立穷举抽查 40 条查询。",
+      "output": "查询中位数（秒）：均匀 0.118→0.117，高斯 0.144→0.137，100 个过滤值 0.310→0.111。写入中位数：0.607→0.545、0.645→0.570、0.967→0.889。各轮完整排名一致。",
+      "base_commit": "3dfd062502aed05de32b269c64bd32995b0ffb5e",
+      "checked_code_commit": "c2c49535f2c106e9046130d82f71b6c5504b6c60",
+      "process_peak_rss_kib": [
+        [
+          9920,
+          9660
+        ],
+        [
+          9760,
+          9532
+        ],
+        [
+          9920,
+          9656
+        ]
+      ],
+      "log_bytes": 5623331,
+      "limitations": "进程 RSS 和日志长度是本地辅助数据。正式评测使用整个容器的内存峰值与设备物理 I/O。未测得本提交的官方 E。"
+    },
+    {
+      "id": "E11",
+      "topic": "公开用例及恢复回归",
+      "source": "本轮执行的官方协议检查器与 verify.py --stress",
+      "method": "用 GCC 13.3.0 构建 c2c49535 对应源码。用 f4d4e266 公开题包验证默认 JSONL 入口，随后执行事务、强杀和限内存恢复回归。",
+      "output": "handshake: PASS\nOfficial public samples: 20 cases, 95 statements passed",
+      "checked_code_commit": "c2c49535f2c106e9046130d82f71b6c5504b6c60",
+      "public_suite_commit": "f4d4e26653af823a7601668802f80e374ad6643c",
+      "additional_output": "Discarded 15,991,783 uncommitted bytes twice checked with a 9,437,184-byte address limit"
+    },
+    {
+      "id": "E12",
+      "topic": "二维过滤、同距、向量更新和回滚",
+      "source": "用户给出输入和原预测，本轮执行 SQL",
+      "method": "对 tag=a 的行做原点 Top2。比较初始结果、id=3 移远、事务内移近及回滚后的结果。",
+      "output": "初始 [[1,0],[2,5]]。id=3 改为 [10,10] 后仍为 [[1,0],[2,5]]。事务内改为 [0,1] 时为 [[1,0],[3,1]]。ROLLBACK 后恢复 [[1,0],[2,5]]。",
+      "checked_code_commit": "c2c49535f2c106e9046130d82f71b6c5504b6c60",
+      "user_prediction_pointers": [
+        "/conversations/39/content",
+        "/conversations/40/content",
+        "/conversations/41/content"
+      ],
+      "checked_expectation": "按用户给出的并列规则，2 的主键小于 3，所以初始应为 1,2。移远不改变排名，额外移近测试可区分查询结果是否更新。",
+      "inputs": {
+        "create": "CREATE TABLE t (id BIGINT PRIMARY KEY, tag VARCHAR(8), v VECTOR(2))",
+        "insert": "INSERT INTO t VALUES (1,'a','[0,0]'),(2,'a','[3,4]'),(3,'a','[0,5]'),(4,'b','[0,0]')",
+        "topk": "SELECT id,L2_DISTANCE(v,'[0,0]') AS d FROM t WHERE tag='a' ORDER BY d LIMIT 2",
+        "move_3_far": "UPDATE t SET v='[10,10]' WHERE id=3",
+        "move_3_near": "UPDATE t SET v='[0,1]' WHERE id=3"
+      },
+      "actual_rows": {
+        "initial_top": [
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            5
+          ]
+        ],
+        "after_update": [
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            5
+          ]
+        ],
+        "in_transaction": [
+          [
+            1,
+            0
+          ],
+          [
+            3,
+            1
+          ]
+        ],
+        "after_rollback": [
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            5
+          ]
+        ]
+      }
+    },
+    {
+      "id": "E13",
+      "topic": "量化剪枝与尾块的高维对照",
+      "source": "本轮扩展的独立整数穷举对照",
+      "method": "在支持 AVX2 的环境运行 643 行、128 和 129 维。按半整数坐标生成填充数据，用整数平方和与主键排序作参考，检查单列等值过滤、无过滤和最后一个不完整分块。",
+      "output": "两种维度均得到过滤 Top2 [[1,0],[3,5]]、无过滤 Top4 [[1,0],[643,0],[4,1],[2,5]]，尾块带主键范围查询 [[643,0]]，与穷举一致。",
+      "checked_code_commit": "c2c49535f2c106e9046130d82f71b6c5504b6c60",
+      "runs": [
+        {
+          "rows": 643,
+          "dimension": 128,
+          "seed": 811131,
+          "filtered": [
+            [
+              1,
+              0
+            ],
+            [
+              3,
+              5
+            ]
+          ],
+          "unfiltered": [
+            [
+              1,
+              0
+            ],
+            [
+              643,
+              0
+            ],
+            [
+              4,
+              1
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "tail": [
+            [
+              643,
+              0
+            ]
+          ]
+        },
+        {
+          "rows": 643,
+          "dimension": 129,
+          "seed": 811132,
+          "filtered": [
+            [
+              1,
+              0
+            ],
+            [
+              3,
+              5
+            ]
+          ],
+          "unfiltered": [
+            [
+              1,
+              0
+            ],
+            [
+              643,
+              0
+            ],
+            [
+              4,
+              1
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "tail": [
+            [
+              643,
+              0
+            ]
+          ]
+        }
+      ],
+      "reproduction": "种子分别为 811131、811132。主键 1 到 643，基础 tag 为 id % 4。用 Python Random 为每坐标生成 [-40,40] 的整数，再除以 2。覆盖 id=1、2、3、4、638、640、643 为 tag 0、1、0、2、0、0、3，向量前两坐标依次 [0,0]、[3,4]、[0,5]、[1,0]、[-5,0]、[0,-5]、[0,0]，余维补零。过滤 tag=0，尾块查询 tag=3 AND id>=642。"
+    },
+    {
+      "id": "E14",
+      "topic": "频繁更新后的第一次查询与重复查询",
+      "source": "本轮按用户给出的迁移场景执行并记录",
+      "method": "沿用 643 行、128 维数据，交替把 id=321 的向量设为全零和首坐标 40、其余为零。有过滤一组同时切换 tag=0/1。每次提交后执行两次同一 Top4 查询，逐次与整数穷举比较。耗时统计查询往返。",
+      "output": "有过滤与无过滤各更新 24 轮，共 96 次查询均与穷举一致。写后首次与立即重复的中位耗时，无过滤为 719.2 / 186.2 μs，有过滤为 823.3 / 161.3 μs。",
+      "checked_code_commit": "c2c49535f2c106e9046130d82f71b6c5504b6c60",
+      "runs": [
+        {
+          "filtered": false,
+          "rounds": 24,
+          "first_median_us": 719.2,
+          "repeat_median_us": 186.2,
+          "transition": [
+            [
+              1,
+              643,
+              4,
+              2
+            ],
+            [
+              1,
+              321,
+              643,
+              4
+            ]
+          ]
+        },
+        {
+          "filtered": true,
+          "rounds": 24,
+          "first_median_us": 823.3,
+          "repeat_median_us": 161.3,
+          "transition": [
+            [
+              1,
+              3,
+              638,
+              640
+            ],
+            [
+              1,
+              321,
+              3,
+              638
+            ]
+          ]
+        }
+      ],
+      "interpretation": "两种请求里，写后第一次查询的耗时都更高，和缓存失效、首次读取成本的预期一致。将量化、等值分组的重建成本分开测量还需要进一步对照。",
+      "limitations": "这是同一程序在写后首次和重复请求的顺序对照。差异包含缓存重建、预热及本地协议开销。没有测量关闭优化后的端到端吞吐或正式评分。"
+    },
+    {
+      "id": "E15",
+      "topic": "确认提交与未提交插入的崩溃边界",
+      "source": "本轮执行两次 SIGKILL 和重启核对",
+      "method": "收到初始四行自动提交的成功响应后强杀并重启，逐字段核对四行。随后在显式事务插入 id=5，确认事务内可见，发出 COMMIT 之前再强杀并重启。",
+      "output": "第一次重启后四行的 ID、标签和向量全部保留。第二次重启后仍只有 ID 1、2、3、4，已提交的 id=3 向量为 [10,10]，id=5 不存在。",
+      "checked_code_commit": "c2c49535f2c106e9046130d82f71b6c5504b6c60",
+      "statements": {
+        "insert": "INSERT INTO t VALUES (1,'a','[0,0]'),(2,'a','[3,4]'),(3,'a','[0,5]'),(4,'b','[0,0]')",
+        "full_rows": "SELECT id,tag,v FROM t ORDER BY id",
+        "uncommitted_insert": "INSERT INTO t VALUES (5,'a','[0,1]')"
+      },
+      "after_committed": [
+        [
+          1,
+          "a",
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          2,
+          "a",
+          [
+            3,
+            4
+          ]
+        ],
+        [
+          3,
+          "a",
+          [
+            0,
+            5
+          ]
+        ],
+        [
+          4,
+          "b",
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "after_uncommitted": [
+        [
+          1,
+          "a",
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          2,
+          "a",
+          [
+            3,
+            4
+          ]
+        ],
+        [
+          3,
+          "a",
+          [
+            10,
+            10
+          ]
+        ],
+        [
+          4,
+          "b",
+          [
+            0,
+            0
+          ]
+        ]
+      ]
     }
   ],
   "verification_limits": [
-    "正式平台反馈对应已提测的 4cd0dfe 和 faf9d110；本轮程序输出来自本地复测。",
-    "本地公开检查不能替代平台保留用例；本轮没有平台原始分或有效评审报告。",
-    "现有合并提示未标明待复核、评分结果校验或分数范围中的具体触发项。"
+    "截图记录的是历史对话。4cd0dfe 的平台 E 为 2797.430116，faf9d110 的平台 E 为 3152.922828，3dfd062 的平台 E 为 4427.302903，分别取自用户反馈。",
+    "c2c49535 对应程序的公开检查、压力回归和性能对照来自本地。平台保留用例、E 和 Prompt 评审结果以锁定提交的正式反馈为准。",
+    "平台之前的 Prompt 合并提示没有列出具体触发条件。"
   ],
-  "coverage": "可引用的个人记录涵盖范围澄清、回归要求、版本追问及提测反馈。本轮没有提交个人技术推导或预先写下的验证预测；实验部分记录程序检查结果。"
+  "coverage": "用户提出查询优先的提交标准、量化剪枝风险、二维反例、崩溃恢复预测和写后读假设。实际结果覆盖二维与高维排名、更新、回滚、重启和首次查询耗时。这轮问答和验证发生在历史版本优化完成后。",
+  "screenshot_evidence": [
+    {
+      "id": "S01",
+      "source": "用户提供的第 1 张历史聊天截图",
+      "sha256": "fbeb2a29fdd4fd7b3a47805d309d2077fc0245a007db0e3ed8b905a580810e27",
+      "topic": "首版的本地操作范围、提交约束及交付反馈",
+      "user_excerpt_pointers": [
+        "/conversations/0/content",
+        "/conversations/2/content",
+        "/conversations/4/content"
+      ],
+      "result_excerpt": {
+        "role": "assistant",
+        "commit": "e8fdd76ecfcbf79d5496e99a76f824a8888fd01c",
+        "content": "Linux 自测通过了 SQL、过滤 TopK、事务回滚、强杀及重复恢复。进程在 18 MiB 地址空间限制下重启并检索了约 37 MiB 的日志。本地基准写入 10,000 条向量约 0.23 秒，执行 1,000 次精确 TopK 约 0.37 秒。"
+      }
+    },
+    {
+      "id": "S02",
+      "source": "用户提供的第 2 张历史聊天截图",
+      "sha256": "96f289e8537dc77f14efc3b8ab7af9352c76318aa6cb2db5ad81ff2a1d2824cc",
+      "topic": "4cd0dfe 的平台反馈及 faf9d11 的本地复测",
+      "feedback_commit": "4cd0dfefe2889356e35d3fa86bb67156557c5e3b",
+      "user_excerpt_pointers": [
+        "/conversations/16/content",
+        "/conversations/17/content",
+        "/conversations/18/content",
+        "/conversations/19/content",
+        "/conversations/20/content"
+      ],
+      "result_excerpt": {
+        "role": "assistant",
+        "commit": "faf9d1108ff58b6c12b38df0507ce59346ec262d",
+        "content": "最终镜像通过官方握手、20 组公开用例（95 条 SQL）及 432 组高维 TopK 排名对照。本地三轮测试中，1,000 次查询的耗时中位数从 0.585 秒降到 0.463 秒，约减少 21%；100 批写入从 0.333 秒变为 0.357 秒。"
+      }
+    }
+  ]
 }
