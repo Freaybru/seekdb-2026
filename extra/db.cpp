@@ -10,6 +10,7 @@
 #include <new>
 #include <numeric>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 
 #include <sys/resource.h>
@@ -32,6 +33,9 @@ struct RowRef {
   uint64_t offset;
   uint32_t length;
   uint16_t packed_bytes = 0;
+  uint8_t header_bytes = Frame::header_size;
+
+  uint64_t payload_offset() const { return offset + header_bytes; }
 };
 // One tree node covers a sorted page of row locations. Page boundaries stay
 // valid when the first key is removed, so only splits and merges edit the tree.
@@ -274,7 +278,7 @@ namespace {
 
 std::string_view payload(Log& log, RowRef row) {
   // RowRef uses the frame offset so it can also serve as an undo pointer.
-  return log.read(row.offset + Frame::header_size, row.length);
+  return log.read(row.payload_offset(), row.length);
 }
 
 constexpr uint32_t max_packed_dimensions = 4096;
@@ -340,7 +344,7 @@ uint32_t stored_vector_bytes(const Table& table, RowRef row) {
 }
 
 RowRef row_location(Log& log, const Table& table, const Frame& frame) {
-  if (frame.op != Op::packed_put) return {frame.offset, frame.length};
+  if (frame.op != Op::packed_put) return {frame.offset, frame.length, 0, frame.header_bytes};
   if (frame.length < sizeof(uint16_t) || table.vector_bytes > max_packed_dimensions * sizeof(float)) {
     throw std::runtime_error("invalid packed row");
   }
@@ -349,7 +353,7 @@ RowRef row_location(Log& log, const Table& table, const Frame& frame) {
   if (size < sizeof(uint16_t) || size > frame.length || size >= table.vector_bytes) {
     throw std::runtime_error("invalid packed vector length");
   }
-  return {frame.offset, frame.length, static_cast<uint16_t>(size)};
+  return {frame.offset, frame.length, static_cast<uint16_t>(size), frame.header_bytes};
 }
 
 #if defined(__x86_64__)
@@ -461,7 +465,7 @@ void unpack_vector(std::string_view bytes, std::span<char> output) {
 using VectorBuffer = std::array<char, max_packed_dimensions * sizeof(float)>;
 
 std::string_view read_vector(Log& log, const Table& table, RowRef row, VectorBuffer& buffer) {
-  const auto bytes = log.read(row.offset + Frame::header_size, stored_vector_bytes(table, row));
+  const auto bytes = log.read(row.payload_offset(), stored_vector_bytes(table, row));
   if (!row.packed_bytes) return bytes;
   if (table.vector_bytes > buffer.size()) throw std::runtime_error("packed vector is too large");
   unpack_vector(bytes, std::span(buffer).first(table.vector_bytes));
@@ -469,7 +473,7 @@ std::string_view read_vector(Log& log, const Table& table, RowRef row, VectorBuf
 }
 
 float first_coordinate(Log& log, const Table& table, RowRef row) {
-  const uint64_t offset = row.offset + Frame::header_size;
+  const uint64_t offset = row.payload_offset();
   if (!row.packed_bytes) return load<float>(log.read(offset, sizeof(float)));
   const auto bytes = log.read(offset, row.packed_bytes);
   Reader reader(bytes);
@@ -494,7 +498,7 @@ float first_coordinate(Log& log, const Table& table, RowRef row) {
 std::string_view scalar_payload(Log& log, const Table& table, RowRef row) {
   const uint32_t skip = stored_vector_bytes(table, row);
   if (skip > row.length) throw std::runtime_error("truncated vector");
-  return log.read(row.offset + Frame::header_size + skip, row.length - skip);
+  return log.read(row.payload_offset() + skip, row.length - skip);
 }
 
 void encode(std::string& out, const Column& column, const Literal& value) {
@@ -606,7 +610,7 @@ bool matches(std::span<const Filter> filters, std::span<const Cell> cells) {
 // Scalar fields follow the vector in schema order. A VARCHAR length prefix
 // lets us skip unrelated text and compare just the bytes shared with a literal.
 bool matches_wide_row(Log& log, const Table& table, RowRef row, std::span<const Filter> filters) {
-  uint64_t next = row.offset + Frame::header_size;
+  uint64_t next = row.payload_offset();
   const uint64_t end = next + row.length;
   const auto take = [&](uint32_t length) {
     if (length > end - next) throw std::runtime_error("truncated record");
@@ -778,14 +782,15 @@ uint64_t filter_tag(const Cell& value) {
   return std::hash<std::string_view>{}(std::get<std::string_view>(value));
 }
 
-using TaggedRow = std::pair<uint64_t, BoundRow>;
-
 std::unique_ptr<BoundGroups> group_rows(Log& log, const Table& table, size_t column, size_t budget,
-                                        std::vector<TaggedRow>& tagged) {
+                                       std::vector<BoundRow>& ordered) {
   constexpr size_t max_buckets = 512;
   const size_t count = table.rows.size();
-  if (sizeof(BoundGroups) + count * sizeof(TaggedRow) > budget) return {};
-  tagged.reserve(count);
+  if (sizeof(BoundGroups) + count * (sizeof(BoundRow) + sizeof(uint16_t)) > budget) return {};
+  std::vector<uint16_t> labels;
+  labels.reserve(count);
+  std::vector<BoundGroups::Bucket> buckets;
+  std::unordered_map<uint64_t, uint16_t> ordinal;
   for (const auto& entry : table.rows) {
     const auto& row = entry.second;
     // Avoid reading unrelated wide payloads to build an optional shortcut.
@@ -795,28 +800,40 @@ std::unique_ptr<BoundGroups> group_rows(Log& log, const Table& table, size_t col
       if (field == table.vector) continue;
       const auto value = read_cell(reader, table.columns[field]);
       if (field != column) continue;
-      tagged.emplace_back(filter_tag(value), BoundRow{&entry});
+      const auto tag = filter_tag(value);
+      auto existing = ordinal.find(tag);
+      if (existing == ordinal.end()) {
+        if (buckets.size() == max_buckets) return {};
+        existing = ordinal.emplace(tag, static_cast<uint16_t>(buckets.size())).first;
+        buckets.push_back({tag, 0, 0});
+      }
+      ++buckets[existing->second].count;
+      labels.push_back(existing->second);
       break;
     }
   }
-  if (tagged.size() != count) return {};
-  // Sorting by tag and then slot preserves primary-key order in each bucket.
-  std::sort(tagged.begin(), tagged.end(), [](const TaggedRow& a, const TaggedRow& b) {
-    return a.first == b.first ? a.second.key() < b.second.key() : a.first < b.first;
-  });
-  size_t buckets = 1;
-  for (size_t i = 1; i < tagged.size(); ++i) buckets += tagged[i].first != tagged[i - 1].first;
-  if (buckets > max_buckets || sizeof(BoundGroups) + tagged.capacity() * sizeof(TaggedRow) +
-      buckets * sizeof(BoundGroups::Bucket) > budget) return {};
+  if (labels.size() != count) return {};
+  // Count the bounded set of tags before scattering rows. The source is
+  // ordered by primary key, so each bucket is already in key order.
+  std::array<size_t, max_buckets> cursor;
+  size_t offset = 0;
+  for (size_t i = 0; i < buckets.size(); ++i) {
+    buckets[i].offset = cursor[i] = offset;
+    offset += buckets[i].count;
+  }
+  const size_t workspace = labels.capacity() * sizeof(uint16_t) +
+      buckets.capacity() * sizeof(BoundGroups::Bucket) + count * sizeof(BoundRow) +
+      ordinal.bucket_count() * sizeof(void*) + ordinal.size() * 48;
+  if (sizeof(BoundGroups) + workspace > budget) return {};
+  ordered.resize(count);
+  size_t i = 0;
+  for (const auto& entry : table.rows) {
+    ordered[cursor[labels[i++]]++] = {&entry};
+  }
   auto groups = std::make_unique<BoundGroups>();
   groups->column = column;
-  groups->buckets.reserve(buckets);
-  for (size_t i = 0; i < tagged.size(); ++i) {
-    if (groups->buckets.empty() || groups->buckets.back().tag != tagged[i].first) {
-      groups->buckets.push_back({tagged[i].first, i, 0});
-    }
-    ++groups->buckets.back().count;
-  }
+  std::ranges::sort(buckets, {}, &BoundGroups::Bucket::tag);
+  groups->buckets = std::move(buckets);
   return groups;
 }
 
@@ -860,10 +877,67 @@ int32_t bound_cutoff(double worst, double margin, const BoundCache& cache, const
   return square >= maximum ? maximum : static_cast<int32_t>(std::ceil(square));
 }
 
+constexpr size_t seeded_rows = 16384;
+
+template <typename Squares, typename Probe>
+__attribute__((target("avx2")))
+void scan_seeded_bounds(const BoundCache& cache, size_t first, size_t last, size_t k,
+                        Squares block_squares, Probe probe) {
+  // The integers select starting candidates only. After measuring their exact
+  // distances, consider every other eligible row against the conservative cutoff.
+  struct Seed { int32_t square; size_t slot; };
+  std::array<Seed, 64> seeds;
+  std::array<int32_t, seeded_rows> squares;
+  const auto better = [](const Seed& a, const Seed& b) { return a.square < b.square; };
+  const auto maximum = std::numeric_limits<int32_t>::max();
+  const size_t start = first & ~(code_block - 1);
+  size_t used = 0;
+  __m256i bound = _mm256_set1_epi32(maximum);
+  for (size_t block = start; block < last; block += code_block) {
+    const auto square = block_squares(block);
+    std::memcpy(squares.data() + block - start, &square, sizeof(square));
+    const auto closer = _mm256_cmpgt_epi32(bound, square);
+    unsigned mask = static_cast<unsigned>(_mm256_movemask_ps(_mm256_castsi256_ps(closer)));
+    while (mask) {
+      const size_t slot = block + std::countr_zero(mask);
+      mask &= mask - 1;
+      if (slot < first || slot >= last) continue;
+      const Seed entry{squares[slot - start], slot};
+      if (used == k) {
+        if (!better(entry, seeds.front())) continue;
+        std::pop_heap(seeds.begin(), seeds.begin() + used, better);
+        --used;
+      }
+      seeds[used++] = entry;
+      std::push_heap(seeds.begin(), seeds.begin() + used, better);
+    }
+    if (used == k) bound = _mm256_set1_epi32(seeds.front().square);
+  }
+
+  int32_t cutoff = maximum;
+  for (size_t i = 0; i < used; ++i) cutoff = probe(cache.rows[seeds[i].slot], cutoff);
+  std::sort(seeds.begin(), seeds.begin() + used, [](const Seed& a, const Seed& b) { return a.slot < b.slot; });
+  size_t seed = 0;
+  for (size_t block = start; block < last; block += code_block) {
+    __m256i square;
+    std::memcpy(&square, squares.data() + block - start, sizeof(square));
+    const auto rejected = _mm256_cmpgt_epi32(square, _mm256_set1_epi32(cutoff));
+    unsigned mask = (1u << code_block) - 1;
+    mask ^= static_cast<unsigned>(_mm256_movemask_ps(_mm256_castsi256_ps(rejected)));
+    while (mask) {
+      const size_t slot = block + std::countr_zero(mask);
+      mask &= mask - 1;
+      if (slot < first || slot >= last) continue;
+      while (seed < used && seeds[seed].slot < slot) ++seed;
+      if (seed == used || seeds[seed].slot != slot) cutoff = probe(cache.rows[slot], cutoff);
+    }
+  }
+}
+
 template <size_t FixedStride, typename Probe>
 __attribute__((target("avx2")))
 void scan_bounds(const BoundCache& cache, const BoundQuery& query,
-                 const KeyRange& range, const BoundGroups::Bucket* bucket, Probe probe) {
+                 const KeyRange& range, const BoundGroups::Bucket* bucket, size_t seed_count, Probe probe) {
   auto rows = std::span(cache.rows);
   if (bucket) rows = rows.subspan(bucket->offset, bucket->count);
   size_t first = rows.data() - cache.rows.data();
@@ -883,24 +957,34 @@ void scan_bounds(const BoundCache& cache, const BoundQuery& query,
     std::memcpy(&word, query.codes.data() + at, code_word);
     broadcast[at / code_word] = _mm256_set1_epi32(word);
   }
-  const auto maximum = std::numeric_limits<int32_t>::max();
-  int32_t cutoff = maximum;
   const __m256i ones = _mm256_set1_epi16(1);
   const __m256i query_norm = _mm256_set1_epi32(query.norm);
-  for (size_t block = first & ~(code_block - 1); block < last; block += code_block) {
+  const auto block_squares = [&](size_t block) __attribute__((target("avx2"))) {
+    const auto* code = cache.codes.data() + block * stride;
+    __m256i sum = _mm256_setzero_si256();
+    for (size_t at = 0; at < stride / code_word; ++at) {
+      __m256i rows;
+      std::memcpy(&rows, code + at * sizeof(rows), sizeof(rows));
+      const __m256i products = _mm256_maddubs_epi16(broadcast[at], rows);
+      sum = _mm256_add_epi32(sum, _mm256_madd_epi16(products, ones));
+    }
+    __m256i row_norm;
+    std::memcpy(&row_norm, cache.norms.data() + block, sizeof(row_norm));
+    return _mm256_sub_epi32(_mm256_add_epi32(row_norm, query_norm), _mm256_slli_epi32(sum, 2));
+  };
+  const auto maximum = std::numeric_limits<int32_t>::max();
+  int32_t cutoff = maximum;
+  const size_t start = first & ~(code_block - 1);
+  if constexpr (FixedStride == 128) {
+    if (seed_count && last - first >= 256 && last - start <= seeded_rows) {
+      scan_seeded_bounds(cache, first, last, seed_count, block_squares, probe);
+      return;
+    }
+  }
+  for (size_t block = start; block < last; block += code_block) {
     unsigned mask = (1u << code_block) - 1;
     if (cutoff != maximum) {
-      const auto* code = cache.codes.data() + block * stride;
-      __m256i sum = _mm256_setzero_si256();
-      for (size_t at = 0; at < stride / code_word; ++at) {
-        __m256i rows;
-        std::memcpy(&rows, code + at * sizeof(rows), sizeof(rows));
-        const __m256i products = _mm256_maddubs_epi16(broadcast[at], rows);
-        sum = _mm256_add_epi32(sum, _mm256_madd_epi16(products, ones));
-      }
-      __m256i row_norm;
-      std::memcpy(&row_norm, cache.norms.data() + block, sizeof(row_norm));
-      const auto square = _mm256_sub_epi32(_mm256_add_epi32(row_norm, query_norm), _mm256_slli_epi32(sum, 2));
+      const auto square = block_squares(block);
       const auto rejected = _mm256_cmpgt_epi32(square, _mm256_set1_epi32(cutoff));
       mask ^= static_cast<unsigned>(_mm256_movemask_ps(_mm256_castsi256_ps(rejected)));
     }
@@ -1022,8 +1106,8 @@ int compare_distance(Log& log, const Table& table, RowRef left, double a, RowRef
   if (const int order = separated_squares(a, b, margin); order != 0) return order;
   if ((a == 0 && b == 0) || left.offset == right.offset) return 0;
   const auto length = static_cast<uint32_t>(query.size() * sizeof(float));
-  const uint64_t left_vector = left.offset + Frame::header_size;
-  const uint64_t right_vector = right.offset + Frame::header_size;
+  const uint64_t left_vector = left.payload_offset();
+  const uint64_t right_vector = right.payload_offset();
   if (!left.packed_bytes && !right.packed_bytes && log.compare_bytes(left_vector, length, right_vector, length) == 0) return 0;
   VectorBuffer buffer;
   const auto left_square = exact_square(read_vector(log, table, left, buffer), query);
@@ -1160,16 +1244,13 @@ void Database::invalidate_index(Table& current) {
 void Database::prepare_bounds(Table& current, std::optional<size_t> equality_column) {
 #if defined(__x86_64__)
   if (current.bounds_attempted && (!equality_column || !current.bounds || current.bounds->groups_attempted)) return;
-  if (current.bounds) {
-    bound_bytes_ -= current.bounds->bytes();
-    current.bounds.reset();
-  }
   current.bounds_attempted = true;
   const size_t dimension = current.vector_bytes / sizeof(float);
   const size_t stride = (dimension + code_word - 1) & ~(code_word - 1);
   const size_t count = current.rows.size();
   const size_t slots = (count + code_block - 1) & ~(code_block - 1);
-  const size_t budget = bound_budget - bound_bytes_;
+  size_t budget = bound_budget - bound_bytes_;
+  if (current.bounds) budget += current.bounds->bytes();
   if (dimension < 32 || dimension > 4096 || count < 512 ||
       slots > budget / (stride + sizeof(BoundRow) + sizeof(int32_t))) return;
   struct rlimit limit {};
@@ -1180,45 +1261,54 @@ void Database::prepare_bounds(Table& current, std::optional<size_t> equality_col
   const auto vector = [&](RowRef row) {
     return read_vector(log_, current, row, buffer);
   };
-  double largest = 0;
-  for (const auto& entry : current.rows) {
-    const auto bytes = vector(entry.second);
-    for (size_t i = 0; i < dimension; ++i) {
-      const auto value = load<float>(bytes.substr(i * sizeof(float), sizeof(float)));
-      if (!std::isfinite(value)) return;
-      largest = std::max(largest, std::abs(double{value}));
+  double inverse_step = current.bounds ? current.bounds->inverse_step : 0;
+  if (inverse_step == 0) {
+    double largest = 0;
+    for (const auto& entry : current.rows) {
+      const auto bytes = vector(entry.second);
+      for (size_t i = 0; i < dimension; ++i) {
+        const auto value = load<float>(bytes.substr(i * sizeof(float), sizeof(float)));
+        if (!std::isfinite(value)) return;
+        largest = std::max(largest, std::abs(double{value}));
+      }
     }
+    if (largest == 0) return;
+    inverse_step = 126.0 / largest;
   }
-  if (largest == 0) return;
 
   std::unique_ptr<BoundCache> cache;
   try {
-    cache = std::make_unique<BoundCache>();
-    cache->rows.reserve(count);
-    cache->norms.resize(slots);
-    cache->codes.resize(slots * stride);
+    if (current.bounds) {
+      bound_bytes_ -= current.bounds->bytes();
+      cache = std::move(current.bounds);
+    } else {
+      cache = std::make_unique<BoundCache>();
+      cache->rows.reserve(count);
+      cache->norms.resize(slots);
+      cache->codes.resize(slots * stride);
+    }
   } catch (const std::bad_alloc&) {
     return;
   }
   if (cache->bytes() > budget) return;
   cache->stride = stride;
   // The query uses twice the row step, keeping the AVX2 pair sum in range.
-  cache->inverse_step = 126.0 / largest;
+  cache->inverse_step = inverse_step;
   cache->groups_attempted = equality_column.has_value();
-  std::vector<TaggedRow> tagged;
   if (equality_column) {
     try {
-      cache->groups = group_rows(log_, current, *equality_column, budget - cache->bytes(), tagged);
+      // Reuse the cache's reserved row array as the scatter destination.
+      cache->groups = group_rows(log_, current, *equality_column,
+                                 budget - cache->bytes() + cache->rows.capacity() * sizeof(BoundRow), cache->rows);
     } catch (const std::bad_alloc&) {
       // A grouped layout is optional.
     }
   }
   double max_error_squared = 0;
-  const auto pack = [&](BoundRow row) {
+  const auto pack = [&](BoundRow row, size_t slot) {
     const auto bytes = vector(row.location());
     int32_t norm = 0;
     double error_squared = 0;
-    const size_t slot = cache->rows.size();
     auto* out = cache->codes.data() + (slot & ~(code_block - 1)) * stride + (slot % code_block) * code_word;
     for (size_t i = 0; i < dimension; ++i) {
       const auto value = load<float>(bytes.substr(i * sizeof(float), sizeof(float)));
@@ -1230,13 +1320,16 @@ void Database::prepare_bounds(Table& current, std::optional<size_t> equality_col
       error_squared += residual * residual;
     }
     cache->norms[slot] = norm;
-    cache->rows.push_back(row);
     max_error_squared = std::max(max_error_squared, error_squared);
   };
   if (cache->groups) {
-    for (const auto& entry : tagged) pack(entry.second);
+    for (size_t i = 0; i < cache->rows.size(); ++i) pack(cache->rows[i], i);
   } else {
-    for (const auto& entry : current.rows) pack({&entry});
+    cache->rows.clear();
+    for (const auto& entry : current.rows) {
+      pack({&entry}, cache->rows.size());
+      cache->rows.push_back({&entry});
+    }
   }
   cache->max_error = std::sqrt(max_error_squared);
   bound_bytes_ += cache->bytes();
@@ -1712,8 +1805,9 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
         if (grouped || !cache.groups || range.unrestricted()) {
           used_bounds = true;
           if (!grouped || bucket) {
-            if (cache.stride == 128) scan_bounds<128>(cache, packed, range, bucket, visit);
-            else scan_bounds<0>(cache, packed, range, bucket, visit);
+            const size_t seeds = filters.empty() || filter_known ? limit : 0;
+            if (cache.stride == 128) scan_bounds<128>(cache, packed, range, bucket, seeds, visit);
+            else scan_bounds<0>(cache, packed, range, bucket, 0, visit);
           }
         }
       }
@@ -1784,7 +1878,7 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
           const auto text = std::get<std::string_view>(decoded[expression.column]);
           const auto bytes = payload(log_, row->second);
           const auto relative = static_cast<uint64_t>(text.data() - bytes.data());
-          entry.values.emplace_back(TextPosition{row->second.offset + Frame::header_size + relative,
+          entry.values.emplace_back(TextPosition{row->second.payload_offset() + relative,
                                                  static_cast<uint32_t>(text.size())});
         }
       }

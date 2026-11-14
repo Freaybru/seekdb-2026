@@ -366,12 +366,12 @@ def packed_storage(binary, root):
             assert binary32(json.loads(vector, parse_int=float)) == binary32(values[key]), key
             assert body == labels[key] and int(tag) == key % 2
 
-    for legacy in (True, False):
-        folder = root / ('legacy' if legacy else 'current')
+    for version in (1, 2, 3):
+        folder = root / f'v{version}'
         folder.mkdir(parents=True)
         log = folder / 'minivectordb.log'
-        if legacy:
-            log.write_bytes(b'MINIVDB1')
+        if version != 3:
+            log.write_bytes(f'MINIVDB{version}'.encode('ascii'))
         with Session(binary, folder) as db:
             db.ok(f'CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR({size}), body VARCHAR(8), tag BIGINT)')
             db.ok('INSERT INTO t VALUES '+','.join(f"({key},'{json.dumps(v)}','{labels[key]}',{key%2})"
@@ -399,23 +399,34 @@ def packed_storage(binary, root):
             assert db.query(query)==[['2']]
             db.quit()
         data = log.read_bytes()
-        assert data[:8] == (b'MINIVDB1' if legacy else b'MINIVDB2')
+        assert data[:8] == f'MINIVDB{version}'.encode('ascii')
         records = {}
         cursor = 8
         while cursor < len(data):
-            length, op, _, key, _ = struct.unpack_from('<IIIqQ',data,cursor)
+            if version == 3 and data[cursor] in (0x80, 0xa0):
+                length, _, key = struct.unpack_from('<HHq',data,cursor+1)
+                op = 6 if data[cursor] == 0xa0 else 3
+                header, footer = 13, 2
+            else:
+                if version == 3:
+                    assert data[cursor] == 0x40
+                marker = 1 if version == 3 else 0
+                length, op, _, key, _ = struct.unpack_from('<IIIqQ',data,cursor+marker)
+                header, footer = 28 + marker, 4 + marker
+                if version == 3:
+                    assert data[cursor + header + length + 4] == 0x80
             if op in (3,6):
-                records[key] = (op, length, data[cursor + 28:cursor + 30])
-            cursor += length + 32
+                records[key] = (op, length, data[cursor + header:cursor + header + 2])
+            cursor += length + header + footer
         assert cursor == len(data)
         assert set(records) == {1,2,3}
-        if legacy:
+        if version == 1:
             assert all(op==3 for op,_,_ in records.values())
         else:
             assert records[1][0]==6 and int.from_bytes(records[1][2],'little') & 0x8000
             assert records[2][0]==6 and not int.from_bytes(records[2][2],'little') & 0x8000
             assert records[3][0]==3
-    print('Lossless float32 storage: two encodings, raw and v1 fallback, indexed filters, rollback and crash recovery passed')
+    print('Lossless float32 storage: v1/v2 compatibility, compact frames, indexed filters, rollback and crash recovery passed')
 
 
 def script_input(binary, root):
@@ -574,7 +585,14 @@ def shutdown_backpressure(binary, root):
 
 def partial_log(binary, root):
     source = root / "source"
+    body = "x" * 33_000
     with Session(binary, source) as db:
+        db.ok("CREATE TABLE wide (id BIGINT PRIMARY KEY, body VARCHAR(40000))")
+        db.ok("BEGIN")
+        db.ok(f"INSERT INTO wide VALUES (1,'{body}')", 1)
+        db.ok("ROLLBACK")
+        assert db.query("SELECT id FROM wide") == []
+        db.ok(f"INSERT INTO wide VALUES (1,'{body}')", 1)
         db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, v BIGINT)")
         db.ok("INSERT INTO t VALUES (1,7)", 1)
         log = source / "minivectordb.log"
@@ -585,7 +603,11 @@ def partial_log(binary, root):
         db.ok("COMMIT")
         db.quit()
     after = log.stat().st_size
-    for number, cut in enumerate((before + 1, before + 28, before + 40, after - 32, after - 1, after)):
+    # v3 uses a wide UPDATE, a compact INSERT and a wide COMMIT. Include
+    # torn length trailers at both insert and commit boundaries.
+    insert = before + 34 + 8
+    for number, cut in enumerate((before + 1, before + 28, insert - 1, insert + 1,
+                                  after - 35, after - 34, after - 33, after - 1, after)):
         directory = root / f"prefix-{number}"
         directory.mkdir()
         copy = directory / log.name
@@ -595,9 +617,10 @@ def partial_log(binary, root):
         expected = [["1", "8"], ["2", "3"]] if cut == after else [["1", "7"]]
         for _ in range(2):
             with Session(binary, directory) as db:
+                assert db.query("SELECT body FROM wide") == [[body]], cut
                 assert db.query("SELECT * FROM t ORDER BY id") == expected, cut
                 db.quit()
-    print("Six log cut points, with two successive recoveries each: passed")
+    print("Nine log cut points, with two successive recoveries each: passed")
 
 
 def process_read_chars(pid):
@@ -608,12 +631,12 @@ def process_read_chars(pid):
 def bounded_memory(binary, root):
     limit = 18 * 1024 * 1024
     size, batch = 1600, 10
-    prefix = "x" * 23999
+    prefix = "x" * 24999
     suffixes = ("甲", "A", "乙")
     keys = list(range(size))
     random.Random(48012).shuffle(keys)
     with Session(binary, root, limit) as db:
-        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, body VARCHAR(24000), v VECTOR(2), tag BIGINT)")
+        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, body VARCHAR(25000), v VECTOR(2), tag BIGINT)")
         for start in range(0, size, batch):
             rows = ",".join(f"({i},'{prefix}{suffixes[i % 3]}','[{i},0]',{i % 2})"
                             for i in keys[start:start + batch])
@@ -677,9 +700,9 @@ def dense_recovery(binary, root):
     keys = list(range(-size // 2, size // 2))
     random.Random(317).shuffle(keys)
     with Session(binary, root) as db:
-        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, tag BIGINT, v VECTOR(2))")
+        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, tag BIGINT, v VECTOR(2), a BIGINT, b BIGINT)")
         for start in range(0, size, 1000):
-            rows = ",".join(f"({key},{key % 7},'[{key % 23},0]')" for key in keys[start:start+1000])
+            rows = ",".join(f"({key},{key % 7},'[{key % 23},0]',0,0)" for key in keys[start:start+1000])
             db.ok("INSERT INTO t VALUES " + rows, 1000)
         db.ok("CREATE VECTOR INDEX ix ON t(v)")
         db.quit()
@@ -708,9 +731,9 @@ def discarded_tail(binary, root):
         db.ok("BEGIN")
         db.ok("UPDATE t SET tag=99 WHERE id=1", 1)
         db.ok("DELETE FROM t WHERE id=2", 1)
-        db.ok("CREATE TABLE staged (id BIGINT PRIMARY KEY, tag BIGINT)")
+        db.ok("CREATE TABLE staged (id BIGINT PRIMARY KEY, tag BIGINT, aux BIGINT)")
         for start in range(0, 400_000, 2000):
-            rows = ",".join(f"({key},-1)" for key in range(start, start+2000))
+            rows = ",".join(f"({key},-1,0)" for key in range(start, start+2000))
             db.ok("INSERT INTO staged VALUES " + rows, 2000)
         db.kill()
     tail = log.stat().st_size - committed
@@ -909,6 +932,39 @@ def packed_bounds(binary, root):
     print("Packed TopK: exact integer ranks, padding, filter buckets, out-of-range queries and mutation/restart passed")
 
 
+def seeded_bounds(binary, root):
+    def vector(value):
+        return json.dumps([value] + [0] * 127)
+
+    outliers = {-301: 1, -250: 0.0018, 280: -0.0017, 281: 0.0017, 282: 0, 302: 0}
+    excluded = {-301, -300, 282}
+    query = ("SELECT id FROM t WHERE tag=4 AND id>-280 AND id<300 "
+             f"ORDER BY L2_DISTANCE(v,'{vector(0)}') LIMIT ")
+    with Session(binary, root) as db:
+        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, tag BIGINT, v VECTOR(128))")
+        for start in range(-301, 306, 100):
+            keys = range(start, min(306, start + 100))
+            rows = ",".join(f"({key},{1 if key in excluded else 4},'{vector(outliers.get(key, 0.002))}')"
+                            for key in keys)
+            db.ok("INSERT INTO t VALUES " + rows, len(keys))
+        # Most rows have the same integer distance. Real distances improve
+        # near the tail of a filtered range with unaligned start and end.
+        assert db.query(query + "1") == [["280"]]
+        assert db.query(query + "2") == [["280"], ["281"]]
+        assert db.query(query + "64") == [[str(key)] for key in (280, 281, -250,
+                                                                *range(-279, -250), *range(-249, -217))]
+        db.ok("BEGIN")
+        db.ok(f"UPDATE t SET v='{vector(0.002)}' WHERE id=280", 1)
+        assert db.query(query + "2") == [["281"], ["-250"]]
+        db.ok("ROLLBACK")
+        assert db.query(query + "2") == [["280"], ["281"]]
+        db.quit()
+    with Session(binary, root) as db:
+        assert db.query(query + "2") == [["280"], ["281"]]
+        db.quit()
+    print("Seeded TopK: quantized ties, unaligned BIGINT filter range, rollback and restart passed")
+
+
 def benchmark(binary, root):
     rng = random.Random(382901)
     dimension, size, k = 128, 10_000, 10
@@ -991,6 +1047,7 @@ def main():
         indexed_ties(binary, root / "index")
         conservative_bounds(binary, root / "bounds")
         packed_bounds(binary, root / "packed-bounds")
+        seeded_bounds(binary, root / "seeded-bounds")
         bounded_memory(binary, root / "large")
         indexed_memory(binary, root / "index-memory")
         if options.stress:

@@ -58,6 +58,8 @@ struct Frame {
   uint32_t table;
   int64_t key;
   uint64_t previous;
+  uint8_t header_bytes = header_size;
+  uint8_t footer_bytes = sizeof(uint32_t);
   uint64_t payload_offset() const;
   uint64_t end() const;
 };
@@ -92,6 +94,7 @@ class Log {
 
   int fd_ = -1;
   bool packed_rows_ = false;
+  bool compact_frames_ = false;
   uint64_t disk_end_ = 0;
   std::string pending_;
   uint64_t block_start_ = 0;
