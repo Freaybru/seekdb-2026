@@ -370,7 +370,7 @@ def packed_storage(binary, root):
         folder = root / f'v{version}'
         folder.mkdir(parents=True)
         log = folder / 'minivectordb.log'
-        if version != 3:
+        if version != 2:
             log.write_bytes(f'MINIVDB{version}'.encode('ascii'))
         with Session(binary, folder) as db:
             db.ok(f'CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR({size}), body VARCHAR(8), tag BIGINT)')
@@ -585,6 +585,8 @@ def shutdown_backpressure(binary, root):
 
 def partial_log(binary, root):
     source = root / "source"
+    source.mkdir(parents=True)
+    (source / "minivectordb.log").write_bytes(b"MINIVDB3")
     body = "x" * 33_000
     with Session(binary, source) as db:
         db.ok("CREATE TABLE wide (id BIGINT PRIMARY KEY, body VARCHAR(40000))")
@@ -932,7 +934,7 @@ def packed_bounds(binary, root):
     print("Packed TopK: exact integer ranks, padding, filter buckets, out-of-range queries and mutation/restart passed")
 
 
-def seeded_bounds(binary, root):
+def quantized_ties(binary, root):
     def vector(value):
         return json.dumps([value] + [0] * 127)
 
@@ -962,7 +964,7 @@ def seeded_bounds(binary, root):
     with Session(binary, root) as db:
         assert db.query(query + "2") == [["280"], ["281"]]
         db.quit()
-    print("Seeded TopK: quantized ties, unaligned BIGINT filter range, rollback and restart passed")
+    print("Quantized TopK: unaligned BIGINT filter range, ties, rollback and restart passed")
 
 
 def benchmark(binary, root):
@@ -1047,7 +1049,7 @@ def main():
         indexed_ties(binary, root / "index")
         conservative_bounds(binary, root / "bounds")
         packed_bounds(binary, root / "packed-bounds")
-        seeded_bounds(binary, root / "seeded-bounds")
+        quantized_ties(binary, root / "quantized-ties")
         bounded_memory(binary, root / "large")
         indexed_memory(binary, root / "index-memory")
         if options.stress:

@@ -69,9 +69,8 @@ Log::Log(const std::filesystem::path& directory) {
     disk_end_ = static_cast<uint64_t>(info.st_size);
     if (disk_end_ < start) {
       // No frame can exist if initialization was interrupted here.
-      write_disk(0, magic);
+      write_disk(0, packed_magic);
       packed_rows_ = true;
-      compact_frames_ = true;
       disk_end_ = start;
       sync_file(fd_);
       const int dir = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
