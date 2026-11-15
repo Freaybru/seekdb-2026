@@ -27,6 +27,8 @@ constexpr size_t index_budget = 4 * 1024 * 1024;
 constexpr size_t bound_budget = 2 * 1024 * 1024;
 constexpr size_t code_block = 8;
 constexpr size_t code_word = 4;
+constexpr size_t geometric_stride = 128;
+constexpr size_t geometric_buckets = 32;
 constexpr uint32_t wide_row = 8 * 1024;
 
 struct RowRef {
@@ -191,8 +193,9 @@ struct BoundRow {
 };
 
 struct BoundGroups {
-  struct Bucket { uint64_t tag; size_t offset; size_t count; };
+  struct Bucket { uint64_t tag; size_t offset; size_t count; int32_t radius = 0; };
   size_t column;
+  bool compact_geometry = false;
   std::vector<Bucket> buckets;
 
   size_t bytes() const {
@@ -288,6 +291,19 @@ constexpr size_t packed_block_bytes = 28;
 
 #if defined(__x86_64__)
 __attribute__((target("avx2")))
+size_t pack_upper_words(std::string_view vector, char* output) {
+  size_t offset = 0;
+  for (; offset + sizeof(__m256i) <= vector.size(); offset += sizeof(__m256i)) {
+    __m256i values;
+    std::memcpy(&values, vector.data() + offset, sizeof(values));
+    const auto halves = _mm256_srli_epi32(values, 16);
+    const auto upper = _mm_packus_epi32(_mm256_castsi256_si128(halves), _mm256_extracti128_si256(halves, 1));
+    std::memcpy(output + offset / 2, &upper, sizeof(upper));
+  }
+  return offset;
+}
+
+__attribute__((target("avx2")))
 size_t pack_blocks(std::string_view vector, unsigned highest, std::string& packed) {
   // Gather the eight least-significant bytes of each of the first three
   // byte planes. The fourth plane is represented by sign and exponent delta.
@@ -354,10 +370,14 @@ std::string_view pack_row(std::string_view row, uint32_t vector_bytes, std::stri
   if (!(low_bits & 0xffffu)) {
     const auto size = static_cast<uint16_t>(2 + 2 * dimension);
     store(packed, static_cast<uint16_t>(size | short_vector));
-    for (size_t i = 0; i < dimension; ++i) {
-      uint16_t upper;
-      std::memcpy(&upper, row.data() + i * sizeof(float) + sizeof(upper), sizeof(upper));
-      store(packed, upper);
+    packed.resize(size);
+    auto* output = packed.data() + sizeof(uint16_t);
+    size_t offset = 0;
+#if defined(__x86_64__)
+    if (__builtin_cpu_supports("avx2")) offset = pack_upper_words(row.substr(0, vector_bytes), output);
+#endif
+    for (; offset < vector_bytes; offset += sizeof(float)) {
+      std::memcpy(output + offset / 2, row.data() + offset + sizeof(uint16_t), sizeof(uint16_t));
     }
   } else {
     const size_t blocks = (dimension + packed_block - 1) / packed_block;
@@ -912,6 +932,53 @@ void group_bound_cache(Log& log, const Table& table, BoundCache& cache, size_t c
   cache.groups = std::move(groups);
 }
 
+using CodePoint = std::array<int8_t, geometric_stride>;
+
+CodePoint code_point(const BoundCache& cache, size_t slot) {
+  CodePoint point;
+  const auto* source = cache.codes.data() + (slot & ~(code_block - 1)) * cache.stride + (slot % code_block) * code_word;
+  for (size_t i = 0; i < point.size(); i += code_word) {
+    std::memcpy(point.data() + i, source + i * code_block, code_word);
+  }
+  return point;
+}
+
+int32_t code_square(const CodePoint& left, const CodePoint& right) {
+  int32_t sum = 0;
+  for (size_t i = 0; i < left.size(); ++i) {
+    const int32_t delta = left[i] - right[i];
+    sum += delta * delta;
+  }
+  return sum;
+}
+
+void prepare_bucket_geometry(BoundCache& cache) {
+  auto& groups = *cache.groups;
+  if (cache.stride != geometric_stride || groups.buckets.size() < 2 ||
+      groups.buckets.size() > geometric_buckets) return;
+  int64_t between = 0;
+  int64_t within = 0;
+  auto previous = code_point(cache, groups.buckets.back().offset);
+  for (const auto& bucket : groups.buckets) {
+    if (bucket.count < code_block) return;
+    const auto center = code_point(cache, bucket.offset);
+    between += code_square(center, previous);
+    within += code_square(center, code_point(cache, bucket.offset + bucket.count / 2));
+    previous = center;
+  }
+  if (between <= 3 * within) return;
+
+  for (auto& bucket : groups.buckets) {
+    const auto center = code_point(cache, bucket.offset);
+    int32_t farthest = 0;
+    for (size_t slot = bucket.offset + 1; slot < bucket.offset + bucket.count; ++slot) {
+      farthest = std::max(farthest, code_square(center, code_point(cache, slot)));
+    }
+    bucket.radius = static_cast<int32_t>(std::sqrt(farthest)) + 1;
+  }
+  groups.compact_geometry = true;
+}
+
 struct BoundQuery {
   std::array<uint8_t, 4096> codes;
   int32_t norm = 0;
@@ -920,40 +987,25 @@ struct BoundQuery {
 
 constexpr int query_bias = 63;
 
-using BlockDot = __m256i (*)(const int8_t*, const __m256i*);
+enum class DotKernel { paired, vex, evex };
 
-__attribute__((target("avx2,avxvnni")))
-__m256i vex_dot_128(const int8_t* code, const __m256i* query) {
-  __m256i acc[4]{};
-  for (size_t i = 0; i < 32; i += 4) {
-#pragma GCC unroll 4
-    for (size_t j = 0; j < 4; ++j) {
-      __m256i rows;
-      std::memcpy(&rows, code + (i + j) * sizeof(rows), sizeof(rows));
-      acc[j] = _mm256_dpbusd_avx_epi32(acc[j], query[i + j], rows);
-    }
+template <DotKernel Kernel>
+__attribute__((target("avx2"), always_inline))
+inline __m256i accumulate_dot(__m256i sum, __m256i query, __m256i rows) {
+  // Select the encoding once per scan so the compiler can keep its registers
+  // live across each eight-row dot product.
+  if constexpr (Kernel == DotKernel::vex) {
+    asm("%{vex%} vpdpbusd %2, %1, %0" : "+x"(sum) : "x"(query), "xm"(rows));
+  } else {
+    asm("%{evex%} vpdpbusd %2, %1, %0" : "+x"(sum) : "x"(query), "xm"(rows));
   }
-  return _mm256_add_epi32(_mm256_add_epi32(acc[0], acc[1]), _mm256_add_epi32(acc[2], acc[3]));
+  return sum;
 }
 
-__attribute__((target("avx2,avx512vnni,avx512vl")))
-__m256i evex_dot_128(const int8_t* code, const __m256i* query) {
-  __m256i acc[4]{};
-  for (size_t i = 0; i < 32; i += 4) {
-#pragma GCC unroll 4
-    for (size_t j = 0; j < 4; ++j) {
-      __m256i rows;
-      std::memcpy(&rows, code + (i + j) * sizeof(rows), sizeof(rows));
-      acc[j] = _mm256_dpbusd_epi32(acc[j], query[i + j], rows);
-    }
-  }
-  return _mm256_add_epi32(_mm256_add_epi32(acc[0], acc[1]), _mm256_add_epi32(acc[2], acc[3]));
-}
-
-BlockDot dot_kernel() {
-  if (__builtin_cpu_supports("avxvnni")) return vex_dot_128;
-  if (__builtin_cpu_supports("avx512vnni") && __builtin_cpu_supports("avx512vl")) return evex_dot_128;
-  return nullptr;
+DotKernel dot_kernel() {
+  if (__builtin_cpu_supports("avxvnni")) return DotKernel::vex;
+  if (__builtin_cpu_supports("avx512vnni") && __builtin_cpu_supports("avx512vl")) return DotKernel::evex;
+  return DotKernel::paired;
 }
 
 int quantize(double value) {
@@ -1067,11 +1119,10 @@ int32_t bound_cutoff(double worst, double margin, const BoundCache& cache, const
   return square >= maximum ? maximum : static_cast<int32_t>(std::ceil(square));
 }
 
-template <size_t FixedStride, bool FullResolution = false, typename Probe>
+template <size_t FixedStride, DotKernel Kernel = DotKernel::paired, typename Probe>
 __attribute__((target("avx2")))
-void scan_bounds(const BoundCache& cache, const BoundQuery& query,
-                 const KeyRange& range, const BoundGroups::Bucket* bucket, Probe probe,
-                 BlockDot dot = nullptr) {
+int32_t scan_bounds(const BoundCache& cache, const BoundQuery& query, const KeyRange& range,
+                    const BoundGroups::Bucket* bucket, Probe probe, int32_t cutoff) {
   auto rows = std::span(cache.rows);
   if (bucket) rows = rows.subspan(bucket->offset, bucket->count);
   size_t first = rows.data() - cache.rows.data();
@@ -1080,8 +1131,9 @@ void scan_bounds(const BoundCache& cache, const BoundQuery& query,
     last = first + (std::ranges::upper_bound(rows, range.high, {}, &BoundRow::key) - rows.begin());
     first += std::ranges::lower_bound(rows, range.low, {}, &BoundRow::key) - rows.begin();
   }
-  if (first >= last) return;
+  if (first >= last) return cutoff;
   const size_t stride = FixedStride ? FixedStride : cache.stride;
+  constexpr bool full_resolution = Kernel != DotKernel::paired;
 
   // Each dot-product lane accumulates four consecutive coordinates of one
   // row per word. The final comparison yields a mask of surviving rows.
@@ -1092,7 +1144,6 @@ void scan_bounds(const BoundCache& cache, const BoundQuery& query,
     broadcast[at / code_word] = _mm256_set1_epi32(word);
   }
   const auto maximum = std::numeric_limits<int32_t>::max();
-  int32_t cutoff = maximum;
   const __m256i ones = _mm256_set1_epi16(1);
   const __m256i query_norm = _mm256_set1_epi32(query.norm);
   for (size_t block = first & ~(code_block - 1); block < last; block += code_block) {
@@ -1100,8 +1151,17 @@ void scan_bounds(const BoundCache& cache, const BoundQuery& query,
     if (cutoff != maximum) {
       const auto* code = cache.codes.data() + block * stride;
       __m256i sum = _mm256_setzero_si256();
-      if constexpr (FullResolution) {
-        sum = dot(code, broadcast);
+      if constexpr (full_resolution) {
+        __m256i accum[4]{};
+        for (size_t i = 0; i < FixedStride / code_word; i += 4) {
+#pragma GCC unroll 4
+          for (size_t j = 0; j < 4; ++j) {
+            __m256i rows;
+            std::memcpy(&rows, code + (i + j) * sizeof(rows), sizeof(rows));
+            accum[j] = accumulate_dot<Kernel>(accum[j], broadcast[i+j], rows);
+          }
+        }
+        sum = _mm256_add_epi32(_mm256_add_epi32(accum[0], accum[1]), _mm256_add_epi32(accum[2], accum[3]));
       } else {
         for (size_t at = 0; at < stride / code_word; ++at) {
           __m256i rows;
@@ -1113,7 +1173,7 @@ void scan_bounds(const BoundCache& cache, const BoundQuery& query,
       __m256i row_norm;
       std::memcpy(&row_norm, cache.norms.data() + block, sizeof(row_norm));
       const auto square = _mm256_sub_epi32(_mm256_add_epi32(row_norm, query_norm),
-                                           _mm256_slli_epi32(sum, FullResolution ? 1 : 2));
+                                           _mm256_slli_epi32(sum, full_resolution ? 1 : 2));
       const auto rejected = _mm256_cmpgt_epi32(square, _mm256_set1_epi32(cutoff));
       mask ^= static_cast<unsigned>(_mm256_movemask_ps(_mm256_castsi256_ps(rejected)));
     }
@@ -1124,6 +1184,32 @@ void scan_bounds(const BoundCache& cache, const BoundQuery& query,
       const auto& row = cache.rows[slot];
       cutoff = probe(row, cutoff);
     }
+  }
+  return cutoff;
+}
+
+template <typename Scan>
+void scan_geometric_buckets(const BoundCache& cache, const BoundQuery& query, bool full_resolution,
+                            Scan scan) {
+  CodePoint point;
+  const int bias = full_resolution ? 2 * query_bias : query_bias;
+  const int step = full_resolution ? 1 : 2;
+  for (size_t i = 0; i < point.size(); ++i) point[i] = static_cast<int8_t>((query.codes[i] - bias) * step);
+  const auto& buckets = cache.groups->buckets;
+  std::array<std::pair<int32_t, size_t>, geometric_buckets> order;
+  for (size_t i = 0; i < buckets.size(); ++i) {
+    const auto& bucket = buckets[i];
+    const int32_t center = code_square(point, code_point(cache, bucket.offset));
+    // The rounded-down center distance minus the rounded-up radius is a
+    // conservative bound in code units. The caller's cutoff includes the
+    // original row and query quantization errors.
+    const int32_t lower = std::max(0, static_cast<int32_t>(std::sqrt(center)) - bucket.radius);
+    order[i] = {lower * lower, i};
+  }
+  std::sort(order.begin(), order.begin() + buckets.size());
+  auto cutoff = std::numeric_limits<int32_t>::max();
+  for (size_t i = 0; i < buckets.size() && order[i].first <= cutoff; ++i) {
+    cutoff = scan(&buckets[order[i].second], cutoff);
   }
 }
 #endif
@@ -1382,6 +1468,7 @@ void Database::prepare_bounds(Table& current, std::optional<size_t> equality_col
     cache.groups_attempted = true;
     try {
       group_bound_cache(log_, current, cache, *equality_column, budget);
+      if (cache.groups) prepare_bucket_geometry(cache);
     } catch (const std::bad_alloc&) {
       // Cache permutation starts only after scratch allocation succeeds.
     }
@@ -1896,8 +1983,8 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
       prepare_bounds(current, equality ? std::optional(equality->column) : std::nullopt);
       BoundQuery packed;
       static const auto accelerated = dot_kernel();
-      const auto dot = current.bounds && current.bounds->stride == 128 ? accelerated : nullptr;
-      if (current.bounds && make_bound_query(*current.bounds, queries[query], dot != nullptr, packed)) {
+      const auto kernel = current.bounds && current.bounds->stride == 128 ? accelerated : DotKernel::paired;
+      if (current.bounds && make_bound_query(*current.bounds, queries[query], kernel != DotKernel::paired, packed)) {
         auto& cache = *current.bounds;
         const bool grouped = equality && cache.groups && cache.groups->column == equality->column;
         // BIGINT tags preserve every bit. Text fingerprints still require the original predicate.
@@ -1915,9 +2002,17 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
         if (grouped || !cache.groups || range.unrestricted()) {
           used_bounds = true;
           if (!grouped || bucket) {
-            if (dot) scan_bounds<128, true>(cache, packed, range, bucket, visit, dot);
-            else if (cache.stride == 128) scan_bounds<128>(cache, packed, range, bucket, visit);
-            else scan_bounds<0>(cache, packed, range, bucket, visit);
+            const auto scan = [&](const BoundGroups::Bucket* target, int32_t cutoff) {
+              if (kernel == DotKernel::vex) return scan_bounds<128, DotKernel::vex>(cache, packed, range, target, visit, cutoff);
+              if (kernel == DotKernel::evex) return scan_bounds<128, DotKernel::evex>(cache, packed, range, target, visit, cutoff);
+              if (cache.stride == 128) return scan_bounds<128>(cache, packed, range, target, visit, cutoff);
+              return scan_bounds<0>(cache, packed, range, target, visit, cutoff);
+            };
+            if (filters.empty() && cache.groups && cache.groups->compact_geometry) {
+              scan_geometric_buckets(cache, packed, kernel != DotKernel::paired, scan);
+            } else {
+              scan(bucket, std::numeric_limits<int32_t>::max());
+            }
           }
         }
       }

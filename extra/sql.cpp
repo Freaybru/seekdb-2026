@@ -8,6 +8,10 @@
 #include <limits>
 #include <utility>
 
+#if defined(__x86_64__)
+#include <emmintrin.h>
+#endif
+
 namespace mini {
 namespace {
 
@@ -406,6 +410,20 @@ class Parser {
 size_t utf8_length(std::string_view value) {
   size_t characters = 0;
   for (size_t i = 0; i < value.size();) {
+#if defined(__x86_64__)
+    if (value.size() - i >= 64) {
+      const auto* bytes = value.data() + i;
+      const auto first = _mm_or_si128(_mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes)),
+                                    _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes + 16)));
+      const auto second = _mm_or_si128(_mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes + 32)),
+                                     _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes + 48)));
+      if (_mm_movemask_epi8(_mm_or_si128(first, second)) == 0) {
+        i += 64;
+        characters += 64;
+        continue;
+      }
+    }
+#endif
     if (value.size() - i >= sizeof(uint64_t)) {
       uint64_t bytes;
       std::memcpy(&bytes, value.data() + i, sizeof(bytes));

@@ -967,6 +967,48 @@ def quantized_ties(binary, root):
     print("Quantized TopK: unaligned BIGINT filter range, ties, rollback and restart passed")
 
 
+def grouped_distance_bounds(binary, root):
+    centers = (-8, 8, 0)
+    keys = list(range(-512, 515))
+    values = {key: [centers[key % 3] + ((key + j) % 7 - 3) / 32 for j in range(128)]
+              for key in keys}
+    # The closest vector in another group's tail ties with the center group.
+    # The covering radius must include this outlier even though sampled rows do not.
+    values[505] = values[510] = [-8] * 128
+    random.Random(15037).shuffle(keys)
+
+    def check(db):
+        def query(center, where, limit):
+            return (f"SELECT id FROM t {where} ORDER BY "
+                    f"L2_DISTANCE(v,'{json.dumps([center] * 128)}') LIMIT {limit}")
+
+        # Build the grouped cache before exercising both scoped and unscoped scans.
+        for center in centers:
+            for where, subset in (("WHERE tag=0", [k for k in keys if k % 3 == 0]),
+                                  ("", keys), ("WHERE id>=500", [k for k in keys if k >= 500])):
+                expected = sorted(subset, key=lambda k: (sum((x - center)**2 for x in values[k]), k))[:10]
+                assert db.query(query(center, where, 10)) == [[str(k)] for k in expected]
+        expected = min(keys, key=lambda k: (sum((x + 8)**2 for x in values[k]), k))
+        assert db.query(query(-8, "", 1)) == [[str(expected)]]
+
+    with Session(binary, root) as db:
+        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, tag BIGINT, v VECTOR(128))")
+        for start in range(0, len(keys), 80):
+            batch = keys[start:start + 80]
+            rows = ",".join(f"({k},{k % 3},'{json.dumps(values[k])}')" for k in batch)
+            db.ok("INSERT INTO t VALUES " + rows, len(batch))
+        db.ok("CREATE VECTOR INDEX i ON t(v)")
+        check(db)
+        db.ok(f"UPDATE t SET v='{json.dumps([8] * 128)}' WHERE id=505", 1)
+        values[505] = [8] * 128
+        check(db)
+        db.quit()
+    with Session(binary, root) as db:
+        check(db)
+        db.quit()
+    print("Grouped distance bounds: full-radius outlier, cross-group ties, update and restart passed")
+
+
 def benchmark(binary, root):
     rng = random.Random(382901)
     dimension, size, k = 128, 10_000, 10
@@ -1050,6 +1092,7 @@ def main():
         conservative_bounds(binary, root / "bounds")
         packed_bounds(binary, root / "packed-bounds")
         quantized_ties(binary, root / "quantized-ties")
+        grouped_distance_bounds(binary, root / "grouped-bounds")
         bounded_memory(binary, root / "large")
         indexed_memory(binary, root / "index-memory")
         if options.stress:
