@@ -29,6 +29,8 @@ constexpr size_t code_block = 8;
 constexpr size_t code_word = 4;
 constexpr size_t geometric_stride = 128;
 constexpr size_t geometric_buckets = 32;
+constexpr size_t max_deferred_rows = bound_budget / geometric_stride;
+constexpr size_t max_seed_neighbors = 16;
 constexpr uint32_t wide_row = 8 * 1024;
 
 struct RowRef {
@@ -193,7 +195,14 @@ struct BoundRow {
 };
 
 struct BoundGroups {
-  struct Bucket { uint64_t tag; size_t offset; size_t count; int32_t radius = 0; };
+  struct Bucket {
+    uint64_t tag;
+    size_t offset;
+    size_t count;
+    int32_t radius = 0;
+    uint32_t label_size = 0;
+    uint64_t label_offset = 0;
+  };
   size_t column;
   bool compact_geometry = false;
   std::vector<Bucket> buckets;
@@ -870,19 +879,35 @@ std::unique_ptr<BoundGroups> group_rows(Log& log, const Table& table, size_t col
     const auto& row = entry.second;
     // Avoid reading unrelated wide payloads to build an optional shortcut.
     if (row.length > wide_row) return {};
-    Reader reader(scalar_payload(log, table, row));
+    const auto scalars = scalar_payload(log, table, row);
+    Reader reader(scalars);
     for (size_t field : table.layout) {
       if (field == table.vector) continue;
       const auto value = read_cell(reader, table.columns[field]);
       if (field != column) continue;
       const auto tag = filter_tag(value);
       auto item = labels.find(tag);
-      if (item == labels.end()) {
+      const bool new_bucket = item == labels.end();
+      if (new_bucket) {
         if (groups->buckets.size() == max_buckets) return {};
         item = labels.emplace(tag, static_cast<uint16_t>(groups->buckets.size())).first;
         groups->buckets.push_back({tag, 0, 0});
       }
-      ++groups->buckets[item->second].count;
+      auto& bucket = groups->buckets[item->second];
+      if (const auto* text = std::get_if<std::string_view>(&value)) {
+        const uint64_t offset = row.payload_offset() + stored_vector_bytes(table, row) +
+                                (text->data() - scalars.data());
+        const auto length = static_cast<uint32_t>(text->size());
+        if (new_bucket) {
+          bucket.label_offset = offset;
+          bucket.label_size = length;
+        } else if (bucket.label_offset && (bucket.label_size != length ||
+                   log.compare_bytes(bucket.label_offset, length, offset, length) != 0)) {
+          // A fingerprint collision makes this bucket use the row predicate.
+          bucket.label_offset = 0;
+        }
+      }
+      ++bucket.count;
       destinations.push_back(item->second);
       break;
     }
@@ -1119,10 +1144,100 @@ int32_t bound_cutoff(double worst, double margin, const BoundCache& cache, const
   return square >= maximum ? maximum : static_cast<int32_t>(std::ceil(square));
 }
 
+template <size_t FixedStride, DotKernel Kernel>
+__attribute__((target("avx2"), always_inline))
+inline __m256i block_squares(const BoundCache& cache, size_t block, const __m256i* broadcast,
+                            __m256i query_norm, size_t stride) {
+  constexpr bool full_resolution = Kernel != DotKernel::paired;
+  const auto* code = cache.codes.data() + block * stride;
+  __m256i sum = _mm256_setzero_si256();
+  if constexpr (full_resolution) {
+    __m256i accum[4]{};
+    for (size_t i = 0; i < FixedStride / code_word; i += 4) {
+#pragma GCC unroll 4
+      for (size_t j = 0; j < 4; ++j) {
+        __m256i rows;
+        std::memcpy(&rows, code + (i + j) * sizeof(rows), sizeof(rows));
+        accum[j] = accumulate_dot<Kernel>(accum[j], broadcast[i+j], rows);
+      }
+    }
+    sum = _mm256_add_epi32(_mm256_add_epi32(accum[0], accum[1]), _mm256_add_epi32(accum[2], accum[3]));
+  } else {
+    const __m256i ones = _mm256_set1_epi16(1);
+    for (size_t at = 0; at < stride / code_word; ++at) {
+      __m256i rows;
+      std::memcpy(&rows, code + at * sizeof(rows), sizeof(rows));
+      const __m256i products = _mm256_maddubs_epi16(broadcast[at], rows);
+      sum = _mm256_add_epi32(sum, _mm256_madd_epi16(products, ones));
+    }
+  }
+  __m256i row_norm;
+  std::memcpy(&row_norm, cache.norms.data() + block, sizeof(row_norm));
+  return _mm256_sub_epi32(_mm256_add_epi32(row_norm, query_norm),
+                          _mm256_slli_epi32(sum, full_resolution ? 1 : 2));
+}
+
+template <DotKernel Kernel, typename Probe>
+__attribute__((target("avx2")))
+int32_t scan_deferred(const BoundCache& cache, const __m256i* broadcast, __m256i query_norm,
+                      size_t first, size_t last, size_t limit, Probe probe) {
+  const auto maximum = std::numeric_limits<int32_t>::max();
+  const auto start = first & ~(code_block - 1);
+  alignas(32) std::array<int32_t, max_deferred_rows> squares;
+  struct Candidate { int32_t square; size_t slot; };
+  std::array<Candidate, max_seed_neighbors> seeds;
+  const auto nearer = [](const Candidate& a, const Candidate& b) { return a.square < b.square; };
+  size_t count = 0;
+  int32_t worst = maximum;
+  for (size_t block = start; block < last; block += code_block) {
+    const auto square = block_squares<geometric_stride, Kernel>(cache, block, broadcast,
+                                                               query_norm, geometric_stride);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(squares.data() + (block - start)), square);
+    const auto better = _mm256_cmpgt_epi32(_mm256_set1_epi32(worst), square);
+    unsigned mask = static_cast<unsigned>(_mm256_movemask_ps(_mm256_castsi256_ps(better)));
+    while (mask) {
+      const size_t slot = block + std::countr_zero(mask);
+      mask &= mask - 1;
+      const auto value = squares[slot - start];
+      if (slot < first || slot >= last || value >= worst) continue;
+      if (count != limit) {
+        seeds[count++] = {value, slot};
+      } else {
+        std::pop_heap(seeds.begin(), seeds.begin()+count, nearer);
+        seeds[count-1] = {value, slot};
+      }
+      std::push_heap(seeds.begin(), seeds.begin()+count, nearer);
+      if (count == limit) worst = seeds[0].square;
+    }
+  }
+  // The approximate heap only picks rows to validate first. Use the exact
+  // heap's conservative cutoff for all other rows, including distance ties.
+  int32_t cutoff = maximum;
+  for (size_t i = 0; i < count; ++i) {
+    cutoff = probe(cache.rows[seeds[i].slot], cutoff);
+    squares[seeds[i].slot - start] = maximum;
+  }
+  for (size_t block = start; block < last; block += code_block) {
+    const auto square = _mm256_load_si256(reinterpret_cast<const __m256i*>(squares.data() + (block - start)));
+    const auto threshold = _mm256_set1_epi32(std::min(cutoff, maximum - 1));
+    const auto rejected = _mm256_cmpgt_epi32(square, threshold);
+    unsigned mask = ((1u << code_block) - 1) ^
+                    static_cast<unsigned>(_mm256_movemask_ps(_mm256_castsi256_ps(rejected)));
+    while (mask) {
+      const size_t slot = block + std::countr_zero(mask);
+      mask &= mask - 1;
+      if (slot >= first && slot < last && squares[slot - start] <= cutoff) {
+        cutoff = probe(cache.rows[slot], cutoff);
+      }
+    }
+  }
+  return cutoff;
+}
+
 template <size_t FixedStride, DotKernel Kernel = DotKernel::paired, typename Probe>
 __attribute__((target("avx2")))
 int32_t scan_bounds(const BoundCache& cache, const BoundQuery& query, const KeyRange& range,
-                    const BoundGroups::Bucket* bucket, Probe probe, int32_t cutoff) {
+                    const BoundGroups::Bucket* bucket, Probe probe, int32_t cutoff, size_t seed_limit) {
   auto rows = std::span(cache.rows);
   if (bucket) rows = rows.subspan(bucket->offset, bucket->count);
   size_t first = rows.data() - cache.rows.data();
@@ -1133,7 +1248,6 @@ int32_t scan_bounds(const BoundCache& cache, const BoundQuery& query, const KeyR
   }
   if (first >= last) return cutoff;
   const size_t stride = FixedStride ? FixedStride : cache.stride;
-  constexpr bool full_resolution = Kernel != DotKernel::paired;
 
   // Each dot-product lane accumulates four consecutive coordinates of one
   // row per word. The final comparison yields a mask of surviving rows.
@@ -1144,36 +1258,16 @@ int32_t scan_bounds(const BoundCache& cache, const BoundQuery& query, const KeyR
     broadcast[at / code_word] = _mm256_set1_epi32(word);
   }
   const auto maximum = std::numeric_limits<int32_t>::max();
-  const __m256i ones = _mm256_set1_epi16(1);
   const __m256i query_norm = _mm256_set1_epi32(query.norm);
+  if constexpr (FixedStride == geometric_stride) {
+    if (cutoff == maximum && seed_limit && seed_limit <= max_seed_neighbors && last - first >= 64) {
+      return scan_deferred<Kernel>(cache, broadcast, query_norm, first, last, seed_limit, probe);
+    }
+  }
   for (size_t block = first & ~(code_block - 1); block < last; block += code_block) {
     unsigned mask = (1u << code_block) - 1;
     if (cutoff != maximum) {
-      const auto* code = cache.codes.data() + block * stride;
-      __m256i sum = _mm256_setzero_si256();
-      if constexpr (full_resolution) {
-        __m256i accum[4]{};
-        for (size_t i = 0; i < FixedStride / code_word; i += 4) {
-#pragma GCC unroll 4
-          for (size_t j = 0; j < 4; ++j) {
-            __m256i rows;
-            std::memcpy(&rows, code + (i + j) * sizeof(rows), sizeof(rows));
-            accum[j] = accumulate_dot<Kernel>(accum[j], broadcast[i+j], rows);
-          }
-        }
-        sum = _mm256_add_epi32(_mm256_add_epi32(accum[0], accum[1]), _mm256_add_epi32(accum[2], accum[3]));
-      } else {
-        for (size_t at = 0; at < stride / code_word; ++at) {
-          __m256i rows;
-          std::memcpy(&rows, code + at * sizeof(rows), sizeof(rows));
-          const __m256i products = _mm256_maddubs_epi16(broadcast[at], rows);
-          sum = _mm256_add_epi32(sum, _mm256_madd_epi16(products, ones));
-        }
-      }
-      __m256i row_norm;
-      std::memcpy(&row_norm, cache.norms.data() + block, sizeof(row_norm));
-      const auto square = _mm256_sub_epi32(_mm256_add_epi32(row_norm, query_norm),
-                                           _mm256_slli_epi32(sum, full_resolution ? 1 : 2));
+      const auto square = block_squares<FixedStride, Kernel>(cache, block, broadcast, query_norm, stride);
       const auto rejected = _mm256_cmpgt_epi32(square, _mm256_set1_epi32(cutoff));
       mask ^= static_cast<unsigned>(_mm256_movemask_ps(_mm256_castsi256_ps(rejected)));
     }
@@ -1987,8 +2081,13 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
       if (current.bounds && make_bound_query(*current.bounds, queries[query], kernel != DotKernel::paired, packed)) {
         auto& cache = *current.bounds;
         const bool grouped = equality && cache.groups && cache.groups->column == equality->column;
-        // BIGINT tags preserve every bit. Text fingerprints still require the original predicate.
-        const bool filter_known = grouped && std::holds_alternative<int64_t>(equality->value);
+        const auto* bucket = grouped ? cache.groups->lookup(filter_tag(equality->value)) : nullptr;
+        bool filter_known = grouped && std::holds_alternative<int64_t>(equality->value);
+        if (bucket && bucket->label_offset) {
+          const auto text = log_.read(bucket->label_offset, bucket->label_size);
+          if (text == std::get<std::string_view>(equality->value)) filter_known = true;
+          else bucket = nullptr;
+        }
         double previous_worst = -1;
         const auto visit = [&](const BoundRow& entry, int32_t cutoff) {
           probe(entry.key(), entry.location(), filter_known, true);
@@ -1998,15 +2097,19 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
           }
           return cutoff;
         };
-        const auto* bucket = grouped ? cache.groups->lookup(filter_tag(equality->value)) : nullptr;
         if (grouped || !cache.groups || range.unrestricted()) {
           used_bounds = true;
           if (!grouped || bucket) {
+            const size_t seed_limit = (filters.empty() || filter_known) ? limit : 0;
             const auto scan = [&](const BoundGroups::Bucket* target, int32_t cutoff) {
-              if (kernel == DotKernel::vex) return scan_bounds<128, DotKernel::vex>(cache, packed, range, target, visit, cutoff);
-              if (kernel == DotKernel::evex) return scan_bounds<128, DotKernel::evex>(cache, packed, range, target, visit, cutoff);
-              if (cache.stride == 128) return scan_bounds<128>(cache, packed, range, target, visit, cutoff);
-              return scan_bounds<0>(cache, packed, range, target, visit, cutoff);
+              if (kernel == DotKernel::vex) {
+                return scan_bounds<128, DotKernel::vex>(cache, packed, range, target, visit, cutoff, seed_limit);
+              }
+              if (kernel == DotKernel::evex) {
+                return scan_bounds<128, DotKernel::evex>(cache, packed, range, target, visit, cutoff, seed_limit);
+              }
+              if (cache.stride == 128) return scan_bounds<128>(cache, packed, range, target, visit, cutoff, seed_limit);
+              return scan_bounds<0>(cache, packed, range, target, visit, cutoff, 0);
             };
             if (filters.empty() && cache.groups && cache.groups->compact_geometry) {
               scan_geometric_buckets(cache, packed, kernel != DotKernel::paired, scan);

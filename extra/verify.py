@@ -1009,6 +1009,48 @@ def grouped_distance_bounds(binary, root):
     print("Grouped distance bounds: full-radius outlier, cross-group ties, update and restart passed")
 
 
+def shortlist_bounds(binary, root):
+    keys = list(range(1, 644))
+    values = {key: (-1)**key * (80 + key % 11) / 65536 for key in keys}
+    values.update({1: 1.0, 255: 0.0, 270: 0.0, 599: 0.0})
+
+    def vector(value):
+        return json.dumps([value] + [0] * 127)
+
+    def check(db, where, subset, limit):
+        sql = f"SELECT id FROM t {where} ORDER BY L2_DISTANCE(v,'{vector(0)}') LIMIT {limit}"
+        expected = sorted(subset, key=lambda key: (abs(values[key]), key))[:limit]
+        assert db.query(sql) == [[str(key)] for key in expected]
+
+    kept = keys[257:]
+    where = "WHERE label='保留'"
+    with Session(binary, root) as db:
+        db.ok('CREATE TABLE t (id BIGINT PRIMARY KEY, label VARCHAR(8), v VECTOR(128))')
+        for start in range(0, len(keys), 80):
+            batch = keys[start:start+80]
+            rows = ','.join(f"({key},'{('其他' if key <= 257 else '保留')}','{vector(values[key])}')" for key in batch)
+            db.ok('INSERT INTO t VALUES ' + rows, len(batch))
+        # The second bucket begins partway through a SIMD block. Most
+        # candidates share a quantized score, including the winners and ties.
+        for limit in (1, 10, 16, 17):
+            check(db, where, kept, limit)
+            check(db, '', keys, limit)
+        check(db, "WHERE label='缺失'", [], 10)
+        check(db, where + ' AND id>=589', [key for key in kept if key >= 589], 10)
+        db.ok('BEGIN')
+        db.ok(f"UPDATE t SET v='{vector(1)}' WHERE id=270", 1)
+        values[270] = 1.0
+        check(db, where, kept, 10)
+        db.ok('ROLLBACK')
+        values[270] = 0.0
+        check(db, where, kept, 10)
+        db.kill()
+    with Session(binary, root) as db:
+        check(db, where, kept, 10)
+        db.quit()
+    print('Quantized shortlist: rank ties, partial blocks, VARCHAR equality, rollback and restart passed')
+
+
 def benchmark(binary, root):
     rng = random.Random(382901)
     dimension, size, k = 128, 10_000, 10
@@ -1093,6 +1135,7 @@ def main():
         packed_bounds(binary, root / "packed-bounds")
         quantized_ties(binary, root / "quantized-ties")
         grouped_distance_bounds(binary, root / "grouped-bounds")
+        shortlist_bounds(binary, root / "shortlist")
         bounded_memory(binary, root / "large")
         indexed_memory(binary, root / "index-memory")
         if options.stress:
