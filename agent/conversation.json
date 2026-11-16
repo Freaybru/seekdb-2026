@@ -1,9 +1,9 @@
 {
   "title": "MiniVectorDB 项目决策与提测记录",
-  "material_summary": "我根据 3dfd062 的正式性能反馈制定下一版的提测门槛，解释量化剪枝的精确性边界，设计并列、过滤、回滚和崩溃恢复的测试，并提出频繁写后读的取舍。材料保存我的原话、校对后的预期、两张历史截图的可核对摘录，以及实际回归和性能结果。",
+  "material_summary": "我复查了过滤 TopK 的同距顺序，纠正原先把 id=3 排在 id=2 前面的预测，并改动实际位于前两名的记录来检验事务和回滚。对已经发送 COMMIT 但未收到回复的情况，我要求逐字段和过滤排名一起检查整笔事务。面对两次正式 E 的差异，我提出只改变日志格式的对照，同时核对提交耗时、查询、设备 I/O、内存峰值和 Recall@10。材料保留我的原话、此前学习记录及对应版本的实际测试输出。",
   "rule_version": "agent-learning-evidence-v3-unbounded",
   "synthetic": false,
-  "scope": "节录本项目的约束、提测反馈、用户对四个问题的原答、两张历史聊天截图和相关验证结果。用户原答按引用长度切分，第一人称复盘依据这些原答整理。实验结果记录实际执行来源。截图保存可见文字摘录和原件摘要，本地路径已省略。",
+  "scope": "节录参赛约束、提测反馈、前两轮问答原文与对应实测。此前两张历史截图保留可见文字和原件摘要。第一人称复盘依据用户已给出的回答整理。运行结果和复测判据引用同一 JSON 内的实验记录。",
   "project": {
     "assignment": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6",
     "branch": "2026-competition-round2",
@@ -11,7 +11,10 @@
     "official_commit": "f4d4e26653af823a7601668802f80e374ad6643c",
     "official_protocol": "https://github.com/oceanbase/seekdb/blob/f4d4e26653af823a7601668802f80e374ad6643c/STDIO_PROTOCOL.md",
     "previous_baseline_commit": "4cd0dfefe2889356e35d3fa86bb67156557c5e3b",
-    "checked_code_commit": "c2c49535f2c106e9046130d82f71b6c5504b6c60"
+    "checked_code_commit": "168d1fddf5dc9c18d1ff920e0286d19182264a37",
+    "historical_checked_code_commit": "c2c49535f2c106e9046130d82f71b6c5504b6c60",
+    "local_protocol_check": "当前源码在官方驱动下握手通过，公开 SQL 20/20。",
+    "local_verification_date": "2026-11-16"
   },
   "conversations": [
     {
@@ -316,6 +319,42 @@
       "id": "U16",
       "role": "user",
       "content": "再给你两个截图，你可以加进去"
+    },
+    {
+      "id": "A17.1",
+      "role": "assistant",
+      "content": "TopK 同距。 你原来预测 1,3，实测是 1,2，把 id=3 移远后也还是 1,2。你现在怎么解释？你会改哪一行，让事务内的 Top2 真正变化，并能用回滚后的结果识别缓存没失效的问题？",
+      "source": "本轮问答原文"
+    },
+    {
+      "id": "U17.1",
+      "role": "user",
+      "content": "1.原来预期 `1,3` 是我算错了并列顺序。`id=2` 是 `[3,4]`，`id=3` 是 `[0,5]`，两者到 `[0,0]` 的距离都是 5；同距应按主键升序，所以 Top2 在过滤 `tag='a'` 后应是 `1,2`，不是 `1,3`。把 `id=3` 移远后仍是 `1,2`，说明这条更新根本没碰到当前的第 2 名，也就测不出缓存有没有失效。\n要让事务内 Top2 真的变化，应改正在结果里的那一行，也就是 `id=2`。例如 BEGIN 后把 `id=2` 改成 `[10,10]`，事务内再查同一条 Top2，预期从 `1,2` 变成 `1,3`；ROLLBACK 后应回到 `1,2`。如果事务内已经是 `1,3`，回滚后却仍是 `1,3`，就能说明缓存或行引用在回滚后没有失效。",
+      "source": "本轮问答原文"
+    },
+    {
+      "id": "A17.2",
+      "role": "assistant",
+      "content": "崩溃恢复。 你之前区分了「已经收到提交成功」和「还没发出提交」。如果一笔事务改了两行，`COMMIT` 已发出但还没收到回复就强杀，重启后你会核对哪些字段？什么结果能证明发生了部分提交？",
+      "source": "本轮问答原文"
+    },
+    {
+      "id": "U17.2",
+      "role": "user",
+      "content": "2.`COMMIT` 已发出但还没收到成功回复就强杀，重启后允许整笔都在，或整笔都不在，但不能只生效一部分。我会核对：两行是否都在或都不在、各字段（包括向量）是否完整、主键有没有缺一行、过滤后的 TopK 是否和这两行的去留一致。若一行在、另一行不在，或某行标量在、向量仍是旧值，就能证明发生了部分提交。",
+      "source": "本轮问答原文"
+    },
+    {
+      "id": "A17.3",
+      "role": "assistant",
+      "content": "性能掉分。 08f6be2 本地查询变快，官方 E 却从 4543.941928 降到 3419.392588。如果只做一次对照，你想先隔离日志改动还是查询改动？你会固定哪些条件、看哪些指标，什么结果会让你撤回这项改动？",
+      "source": "本轮问答原文"
+    },
+    {
+      "id": "U17.3",
+      "role": "user",
+      "content": "3.官方 E 下降而本地查询变快，我会先隔离**日志/落盘改动**，因为查询变快却总分掉下来，更像写入、I/O 或内存变差，而不是检索本身变慢。对照时固定同一台机器、同一组编译选项、同一数据种子和 10,000×128 / 1,000 次 Top10 负载，只改这一处日志相关代码，分别看写入耗时、查询耗时，以及尽量接近官方口径的磁盘 I/O 和峰值内存；正确性和 Recall@10 也要一起核对。如果日志改动单独就能解释写入变慢、I/O 或内存明显升高，或正确性不稳，我就撤回这项日志改动；如果去掉日志后官方口径仍差，再查查询路径。本地秒数不能直接换算成官方 E，所以撤回标准是：在隔离后看到持久化或资源明显变差，或有正确性回退。",
+      "source": "本轮问答原文"
     }
   ],
   "first_person_review": [
@@ -404,17 +443,35 @@
     {
       "id": "R08",
       "topic": "量化剪枝的正确性与验证设计",
-      "source": "由本轮用户原话整理的第一人称复盘",
-      "statement": "我理解量化码是精确查询的筛选手段。距离下界严格超过当前第 K 名时才能跳过这一行，留下的候选仍按存储的 float32 向量计算欧氏距离。阈值应来自满足过滤条件的候选。我尤其担心等距时漏掉主键更小的行，也想检查第 K 名更新和八行分块的尾部。我设计了四条二维记录，其中一行更近但标签不符，另外两行恰好同距。按我提出的主键升序规则，校对后的初始结果是 1、2。移动第 3 行后再验证事务内能看到新排名，回滚后恢复原排名。二维用例先核对 SQL 语义，实测进一步用高维、足够行数和非整块数据检验 AVX2 路径。",
+      "source": "由选手本轮原话整理的第一人称复盘",
+      "statement": "我理解量化码先用保守下界筛选，候选再用原 float32 算距离。我起初把 id=3 排在同距的 id=2 前面，实际应该按主键升序。在 tag=a 的集合里，初始 Top2 是 1、2。移远不在结果里的 id=3 没有触及第二名。我把复测方案改为在事务里把 id=2 设为 [10,10]。我预期事务内是 1、3，回滚后是 1、2，可以用两次结果对照缓存或行引用是否回到正确状态。",
       "request_pointers": [
         "/conversations/38/content",
         "/conversations/39/content",
         "/conversations/40/content",
-        "/conversations/41/content"
+        "/conversations/41/content",
+        "/conversations/46/content"
       ],
       "result_pointers": [
         "/experiments/11/output",
-        "/experiments/12/output"
+        "/experiments/12/output",
+        "/experiments/15/output"
+      ],
+      "student_evidence": [
+        {
+          "pointer": "/conversations/46/content",
+          "excerpt": "把 `id=3` 移远后仍是 `1,2`，说明这条更新根本没碰到当前的第 2 名，也就测不出缓存有没有失效。"
+        },
+        {
+          "pointer": "/conversations/46/content",
+          "excerpt": "要让事务内 Top2 真的变化，应改正在结果里的那一行，也就是 `id=2`。例如 BEGIN 后把 `id=2` 改成 `[10,10]`，事务内再查同一条 Top2，预期从 `1,2` 变成 `1,3`；ROLLBACK 后应回到 `1,2`。"
+        }
+      ],
+      "result_evidence": [
+        {
+          "pointer": "/experiments/15/output",
+          "excerpt": "二维四行与 128 维 643 行均得到以下 (id,距离) 顺序。初始和移远 id=3 后均为 [(1,0),(2,5)]。还原 id=3 后在事务内移远 id=2，得到 [(1,0),(3,5)]。ROLLBACK 后 id=2 的向量恢复 [3,4]（高维补零），首次、重复查询和重启后均为 [(1,0),(2,5)]。"
+        }
       ]
     },
     {
@@ -432,13 +489,54 @@
     {
       "id": "R10",
       "topic": "事务恢复的验证边界",
-      "source": "由本轮用户原话整理的第一人称复盘",
-      "statement": "我会分别验证收到提交成功和还没发出提交请求这两个时点。前一种强杀后应完整保留四行的主键、标签和向量。后一种在事务里插入第 5 行，确认事务内查得到再强杀，重启后应完全看不到它，同时保留之前已确认的修改。我会查询整行逐字段核对，以免只看总行数漏掉部分字段错误。",
+      "source": "由选手本轮原话整理的第一人称复盘",
+      "statement": "我已经区分收到提交成功后强杀与未发出提交请求就强杀。这次补查已经发出 COMMIT 但未收到回复这一窗口。我允许整个事务保留或整个事务撤销。我要核对两条主键、完整标量和向量字段，并检查过滤 Top2 与重启后状态一致。如果两行只生效一行，或同一行标量与向量分别来自新旧状态，就违反整笔事务原子性。",
       "request_pointers": [
-        "/conversations/42/content"
+        "/conversations/42/content",
+        "/conversations/48/content"
       ],
       "result_pointers": [
-        "/experiments/14/output"
+        "/experiments/14/output",
+        "/experiments/16/output"
+      ],
+      "student_evidence": [
+        {
+          "pointer": "/conversations/48/content",
+          "excerpt": "我会核对：两行是否都在或都不在、各字段（包括向量）是否完整、主键有没有缺一行、过滤后的 TopK 是否和这两行的去留一致。若一行在、另一行不在，或某行标量在、向量仍是旧值，就能证明发生了部分提交。"
+        }
+      ],
+      "result_evidence": [
+        {
+          "pointer": "/experiments/16/output",
+          "excerpt": "共 16 次发送 COMMIT 后未读取回复即 SIGKILL。重启得到完整旧状态 2 次，完整新状态 14 次。每次逐字段核对 id、tag、body、v，过滤 Top2 与恢复数据一致。两行插入和两行更新均覆盖，未观测到新旧字段或新旧行混合。"
+        }
+      ]
+    },
+    {
+      "id": "R11",
+      "statement": "我先把日志和落盘改动作为掉分假设来检查。用同机、同一编译配置和同一输入，分别量写入、查询、设备 I/O 和峰值内存，同时核对正确性及 Recall@10。如果单独的存储改动造成明显写入或资源回退，或者破坏正确性，我会撤回它。如果隔离日志改动后，同口径的对照结果仍差，我再检查查询路径。E 以正式结果为准。",
+      "request_pointers": [
+        "/conversations/50/content"
+      ],
+      "result_pointers": [
+        "/experiments/17/output"
+      ],
+      "source": "由选手本轮原话整理的第一人称复盘",
+      "student_evidence": [
+        {
+          "pointer": "/conversations/50/content",
+          "excerpt": "对照时固定同一台机器、同一组编译选项、同一数据种子和 10,000×128 / 1,000 次 Top10 负载，只改这一处日志相关代码，分别看写入耗时、查询耗时，以及尽量接近官方口径的磁盘 I/O 和峰值内存；正确性和 Recall@10 也要一起核对。"
+        },
+        {
+          "pointer": "/conversations/50/content",
+          "excerpt": "本地秒数不能直接换算成官方 E，所以撤回标准是：在隔离后看到持久化或资源明显变差，或有正确性回退。"
+        }
+      ],
+      "result_evidence": [
+        {
+          "pointer": "/experiments/17/output",
+          "excerpt": "各 6 轮交替，中位数按 MINIVDB2→MINIVDB3 排列。均匀写入 656.1→547.0 ms，查询 104.1→101.7 ms。高斯写入 554.6→564.5 ms，查询 109.4→109.4 ms。两个负载的日志均少 169,796 字节，所有轮的过滤与无过滤 Recall@10 均为 1.000。"
+        }
       ]
     }
   ],
@@ -973,14 +1071,521 @@
           ]
         ]
       ]
+    },
+    {
+      "id": "E16",
+      "topic": "修正同距排序预测并用能改变排名的记录复测回滚",
+      "code_commit": "168d1fddf5dc9c18d1ff920e0286d19182264a37",
+      "source": "官方 JSONL 驱动记录的本地 SQL 响应",
+      "method": "二维数据为 (1,a,[0,0])、(2,a,[3,4])、(3,a,[0,5])、(4,b,[0,0])。使用 WHERE tag='a' ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2，投影 id 和距离。先改变原结果外的 id=3，再还原。BEGIN 后将 id=2 改为 [10,10] 并查询，ROLLBACK 后同时读取 id=2 的原值及同一 Top2。128 维用例将原向量补零，添加 639 行交错标签数据。补充行中 id=643 也等距，参与 a 组的尾部比较。两套数据都建向量索引，并在回滚后连查两次及重启复查。",
+      "output": "二维四行与 128 维 643 行均得到以下 (id,距离) 顺序。初始和移远 id=3 后均为 [(1,0),(2,5)]。还原 id=3 后在事务内移远 id=2，得到 [(1,0),(3,5)]。ROLLBACK 后 id=2 的向量恢复 [3,4]（高维补零），首次、重复查询和重启后均为 [(1,0),(2,5)]。",
+      "observations": [
+        {
+          "dimension": 2,
+          "size": 4,
+          "initial": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "moved_third": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "inside": [
+            [
+              1,
+              0
+            ],
+            [
+              3,
+              5
+            ]
+          ],
+          "restored_vector": [
+            3,
+            4
+          ],
+          "first": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "repeated": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "reopened": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ]
+        },
+        {
+          "dimension": 128,
+          "size": 643,
+          "initial": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "moved_third": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "inside": [
+            [
+              1,
+              0
+            ],
+            [
+              3,
+              5
+            ]
+          ],
+          "restored_vector": [
+            3,
+            4
+          ],
+          "first": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "repeated": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "reopened": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ]
+        }
+      ],
+      "diagnostic": "原值和排名分别核对。出现异常时，若向量已经恢复而排序未恢复，优先排查检索缓存和行引用。若向量本身未恢复，先排查行版本回滚。两个维度的结果用于区分基础 SQL 语义与高维分组检索。"
+    },
+    {
+      "id": "E17",
+      "topic": "发出 COMMIT 后成功回复未被接收时的事务原子性",
+      "code_commit": "168d1fddf5dc9c18d1ff920e0286d19182264a37",
+      "source": "官方 JSONL 传输、进程信号和重启后的实际 SQL 输出",
+      "method": "两组分别在一笔事务中更新两条已存在的记录、插入两条记录。先验证事务内全部修改可见。控制组一在进程暂停时将 COMMIT 发入管道后强杀。控制组二在输出管道可读且客户端尚未读取回复时强杀。另在每种操作上用 0、50、200、1000、3000、8000 微秒的发送后延迟采样。重启复用数据目录，将全部行字段与提交前和事务内的完整快照比较，并核对 tag=a 的向量 Top2。",
+      "output": "共 16 次发送 COMMIT 后未读取回复即 SIGKILL。重启得到完整旧状态 2 次，完整新状态 14 次。每次逐字段核对 id、tag、body、v，过滤 Top2 与恢复数据一致。两行插入和两行更新均覆盖，未观测到新旧字段或新旧行混合。",
+      "representative_snapshots": [
+        {
+          "operation": "update",
+          "window": "queued",
+          "delay_us": 0,
+          "state": "old",
+          "rows": [
+            [
+              1,
+              "a",
+              "anchor",
+              [
+                1,
+                0
+              ]
+            ],
+            [
+              2,
+              "a",
+              "oldA",
+              [
+                4,
+                0
+              ]
+            ],
+            [
+              3,
+              "b",
+              "oldB",
+              [
+                2,
+                0
+              ]
+            ]
+          ],
+          "ranking": [
+            [
+              1,
+              1
+            ],
+            [
+              2,
+              4
+            ]
+          ]
+        },
+        {
+          "operation": "update",
+          "window": "unread",
+          "delay_us": 0,
+          "state": "new",
+          "rows": [
+            [
+              1,
+              "a",
+              "anchor",
+              [
+                1,
+                0
+              ]
+            ],
+            [
+              2,
+              "b",
+              "newA",
+              [
+                8,
+                0
+              ]
+            ],
+            [
+              3,
+              "a",
+              "newB",
+              [
+                0,
+                0
+              ]
+            ]
+          ],
+          "ranking": [
+            [
+              3,
+              0
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        {
+          "operation": "insert",
+          "window": "queued",
+          "delay_us": 0,
+          "state": "old",
+          "rows": [
+            [
+              1,
+              "a",
+              "anchor",
+              [
+                1,
+                0
+              ]
+            ],
+            [
+              2,
+              "a",
+              "oldA",
+              [
+                4,
+                0
+              ]
+            ],
+            [
+              3,
+              "b",
+              "oldB",
+              [
+                2,
+                0
+              ]
+            ]
+          ],
+          "ranking": [
+            [
+              1,
+              1
+            ],
+            [
+              2,
+              4
+            ]
+          ]
+        },
+        {
+          "operation": "insert",
+          "window": "unread",
+          "delay_us": 0,
+          "state": "new",
+          "rows": [
+            [
+              1,
+              "a",
+              "anchor",
+              [
+                1,
+                0
+              ]
+            ],
+            [
+              2,
+              "a",
+              "oldA",
+              [
+                4,
+                0
+              ]
+            ],
+            [
+              3,
+              "b",
+              "oldB",
+              [
+                2,
+                0
+              ]
+            ],
+            [
+              4,
+              "a",
+              "insertA",
+              [
+                0,
+                0
+              ]
+            ],
+            [
+              5,
+              "b",
+              "insertB",
+              [
+                3,
+                0
+              ]
+            ]
+          ],
+          "ranking": [
+            [
+              4,
+              0
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        }
+      ],
+      "observed_races": [
+        {
+          "operation": "update",
+          "delay_us": 0,
+          "state": "new"
+        },
+        {
+          "operation": "update",
+          "delay_us": 50,
+          "state": "new"
+        },
+        {
+          "operation": "update",
+          "delay_us": 200,
+          "state": "new"
+        },
+        {
+          "operation": "update",
+          "delay_us": 1000,
+          "state": "new"
+        },
+        {
+          "operation": "update",
+          "delay_us": 3000,
+          "state": "new"
+        },
+        {
+          "operation": "update",
+          "delay_us": 8000,
+          "state": "new"
+        },
+        {
+          "operation": "insert",
+          "delay_us": 0,
+          "state": "new"
+        },
+        {
+          "operation": "insert",
+          "delay_us": 50,
+          "state": "new"
+        },
+        {
+          "operation": "insert",
+          "delay_us": 200,
+          "state": "new"
+        },
+        {
+          "operation": "insert",
+          "delay_us": 1000,
+          "state": "new"
+        },
+        {
+          "operation": "insert",
+          "delay_us": 3000,
+          "state": "new"
+        },
+        {
+          "operation": "insert",
+          "delay_us": 8000,
+          "state": "new"
+        }
+      ],
+      "diagnostic": "更新测试的两条主键一直存在，所以逐字段比较能识别只改标签或标量、向量滞后的状态。插入测试还核对新增两条主键的共同存在性。覆盖进程被杀的恢复模型，结论范围限于这些时点和输入。"
+    },
+    {
+      "id": "E18",
+      "topic": "正式性能掉分的日志格式单变量排查",
+      "code_commit": "168d1fddf5dc9c18d1ff920e0286d19182264a37",
+      "source": "同一程序的本地 ext4 数据设备、cgroup v2 与独立穷举对照",
+      "historical_feedback": "选手回报 c86f54b 的正式 E 为 4543.941928，08f6be2 的正式 E 为 3419.392588。历史两次提交同时改变了多条路径，本轮用同一个可执行程序隔离日志格式的影响。",
+      "method": "使用同一台 WSL 主机、单个数据库 CPU、同一 GCC 13.3.0 可执行文件、种子 1682026。分别在已同步到 ext4 的两种 8 字节日志头之后开始计量。两版均在成功响应前调用 fdatasync。每个负载使用乱序主键的 10,000×128 维数据，100 组每批 100 行的已提交写入。查询阶段单独装载、创建索引并预热 8 次，随后执行各 500 次过滤和无过滤 Top10。每种分布各运行 6 对，交替起始顺序。写入重启后逐行比较标量及 float32 向量。独立 C++ 穷举原向量给出 1,000 组参考排名，另逐条校验返回距离。",
+      "resource_scope": "各阶段独立 cgroup，内存取 memory.peak，含文件页缓存。I/O 取独立 ext4 loop 块设备的扇区读写计数变化。查询阶段 I/O 和内存含装载、建索引及预热。耗时用 JSONL 端到端墙钟计量。",
+      "output": "各 6 轮交替，中位数按 MINIVDB2→MINIVDB3 排列。均匀写入 656.1→547.0 ms，查询 104.1→101.7 ms。高斯写入 554.6→564.5 ms，查询 109.4→109.4 ms。两个负载的日志均少 169,796 字节，所有轮的过滤与无过滤 Recall@10 均为 1.000。",
+      "measurements": {
+        "uniform": {
+          "rounds_per_format": 6,
+          "medians": {
+            "2": {
+              "log_bytes": 5022370.0,
+              "write_ms": 656.1443575000001,
+              "query_ms": 104.08056149999999,
+              "unfiltered_query_ms": 57.81943699999999,
+              "filtered_query_ms": 46.261124499999994,
+              "write_io_bytes": 7901184.0,
+              "query_io_bytes": 7536640.0,
+              "write_memory_peak_bytes": 8556544.0,
+              "query_memory_peak_bytes": 10162176.0,
+              "recall_unfiltered": 1.0,
+              "recall_filtered": 1.0,
+              "reopened_rows": 10000.0,
+              "rank_matches": 1000.0,
+              "distances_checked": 10000.0
+            },
+            "3": {
+              "log_bytes": 4852574.0,
+              "write_ms": 547.0258054999999,
+              "query_ms": 101.66911049999999,
+              "unfiltered_query_ms": 56.52545549999999,
+              "filtered_query_ms": 45.096309,
+              "write_io_bytes": 7694336.0,
+              "query_io_bytes": 7376896.0,
+              "write_memory_peak_bytes": 8298496.0,
+              "query_memory_peak_bytes": 10129408.0,
+              "recall_unfiltered": 1.0,
+              "recall_filtered": 1.0,
+              "reopened_rows": 10000.0,
+              "rank_matches": 1000.0,
+              "distances_checked": 10000.0
+            }
+          }
+        },
+        "gaussian": {
+          "rounds_per_format": 6,
+          "medians": {
+            "2": {
+              "log_bytes": 5022634.0,
+              "write_ms": 554.6173944999999,
+              "query_ms": 109.39682249999998,
+              "unfiltered_query_ms": 61.7999665,
+              "filtered_query_ms": 47.883145999999996,
+              "write_io_bytes": 7901184.0,
+              "query_io_bytes": 7536640.0,
+              "write_memory_peak_bytes": 8558592.0,
+              "query_memory_peak_bytes": 10129408.0,
+              "recall_unfiltered": 1.0,
+              "recall_filtered": 1.0,
+              "reopened_rows": 10000.0,
+              "rank_matches": 1000.0,
+              "distances_checked": 10000.0
+            },
+            "3": {
+              "log_bytes": 4852838.0,
+              "write_ms": 564.4535484999999,
+              "query_ms": 109.40248849999999,
+              "unfiltered_query_ms": 61.549434,
+              "filtered_query_ms": 47.8530545,
+              "write_io_bytes": 7729152.0,
+              "query_io_bytes": 7364608.0,
+              "write_memory_peak_bytes": 8296448.0,
+              "query_memory_peak_bytes": 10129408.0,
+              "recall_unfiltered": 1.0,
+              "recall_filtered": 1.0,
+              "reopened_rows": 10000.0,
+              "rank_matches": 1000.0,
+              "distances_checked": 10000.0
+            }
+          }
+        }
+      },
+      "rank_checks": "两种格式全部 24 次运行各匹配 1,000 个完整参考排名、校验 10,000 个返回距离并重启核对 10,000 行。",
+      "finding": "紧凑帧在两种分布中均减少设备 I/O 和日志大小，cgroup 峰值相近或下降。均匀数据写入较快，高斯数据写入略慢，未观测到一致的持久化性能回退。目前数据只约束这一项变量，不能用来确定先前正式 E 差异的原因。查询路径和评测机资源仍需进一步独立对照。"
     }
   ],
   "verification_limits": [
     "截图记录的是历史对话。4cd0dfe 的平台 E 为 2797.430116，faf9d110 的平台 E 为 3152.922828，3dfd062 的平台 E 为 4427.302903，分别取自用户反馈。",
     "c2c49535 对应程序的公开检查、压力回归和性能对照来自本地。平台保留用例、E 和 Prompt 评审结果以锁定提交的正式反馈为准。",
-    "平台之前的 Prompt 合并提示没有列出具体触发条件。"
+    "平台之前的 Prompt 合并提示没有列出具体触发条件。",
+    "本轮复测绑定 168d1fd 的源码。设备 I/O 来自隔离的本地 ext4 loop 设备，峰值来自 cgroup v2。官方 E 和 Agent Prompt 分数仍以平台锁定的新提交结果为准。"
   ],
-  "coverage": "用户提出查询优先的提交标准、量化剪枝风险、二维反例、崩溃恢复预测和写后读假设。实际结果覆盖二维与高维排名、更新、回滚、重启和首次查询耗时。这轮问答和验证发生在历史版本优化完成后。",
+  "coverage": "新增同距预测修正、改动结果内记录后的回滚复测、提交请求发出与收到回复之间的原子性检查，以及同一可执行程序内切换两种日志帧格式的单变量对照。保留原有量化剪枝、写后读和恢复测试记录。",
   "screenshot_evidence": [
     {
       "id": "S01",
