@@ -1,9 +1,9 @@
 {
   "title": "MiniVectorDB 项目决策与提测记录",
-  "material_summary": "我复查了过滤 TopK 的同距顺序，纠正原先把 id=3 排在 id=2 前面的预测，并改动实际位于前两名的记录来检验事务和回滚。对已经发送 COMMIT 但未收到回复的情况，我要求逐字段和过滤排名一起检查整笔事务。面对两次正式 E 的差异，我提出只改变日志格式的对照，同时核对提交耗时、查询、设备 I/O、内存峰值和 Recall@10。材料保留我的原话、此前学习记录及对应版本的实际测试输出。",
+  "material_summary": "我复查了同距 TopK 的顺序，并修改实际入选的行检验回滚。对发出 COMMIT 后没有收到回复的窗口，我提出逐字段核对整笔事务。只改日志的实测让我修正了掉分归因，我提出固定二进制和输入来隔离查询缓存。我还给出了 VARCHAR 指纹碰撞的四行反例，以及 48 MiB 下同时核对扫描路径、完整排名和 OOM 的计划。材料收录了实际提问、我的回答和对应的本地诊断结果。",
   "rule_version": "agent-learning-evidence-v3-unbounded",
   "synthetic": false,
-  "scope": "节录参赛约束、提测反馈、前两轮问答原文与对应实测。此前两张历史截图保留可见文字和原件摘要。第一人称复盘依据用户已给出的回答整理。运行结果和复测判据引用同一 JSON 内的实验记录。",
+  "scope": "节录参赛约束、平台反馈、对话原文和对应实测。第一人称复盘由选手已给出的回答整理。保留对话、实验及结果编号，实验注明源码版本和测量范围。两张历史截图保留可见文字和原件摘要。",
   "project": {
     "assignment": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6",
     "branch": "2026-competition-round2",
@@ -13,6 +13,7 @@
     "previous_baseline_commit": "4cd0dfefe2889356e35d3fa86bb67156557c5e3b",
     "checked_code_commit": "168d1fddf5dc9c18d1ff920e0286d19182264a37",
     "historical_checked_code_commit": "c2c49535f2c106e9046130d82f71b6c5504b6c60",
+    "latest_checked_code_commit": "83d066f6e93f720cca283eaadb421f192464b039",
     "local_protocol_check": "当前源码在官方驱动下握手通过，公开 SQL 20/20。",
     "local_verification_date": "2026-11-16"
   },
@@ -355,6 +356,30 @@
       "role": "user",
       "content": "3.官方 E 下降而本地查询变快，我会先隔离**日志/落盘改动**，因为查询变快却总分掉下来，更像写入、I/O 或内存变差，而不是检索本身变慢。对照时固定同一台机器、同一组编译选项、同一数据种子和 10,000×128 / 1,000 次 Top10 负载，只改这一处日志相关代码，分别看写入耗时、查询耗时，以及尽量接近官方口径的磁盘 I/O 和峰值内存；正确性和 Recall@10 也要一起核对。如果日志改动单独就能解释写入变慢、I/O 或内存明显升高，或正确性不稳，我就撤回这项日志改动；如果去掉日志后官方口径仍差，再查查询路径。本地秒数不能直接换算成官方 E，所以撤回标准是：在隔离后看到持久化或资源明显变差，或有正确性回退。",
       "source": "本轮问答原文"
+    },
+    {
+      "id": "U18",
+      "role": "user",
+      "source": "本轮对话原文",
+      "content": "agent prompt也继续提升，要有什么需要我提供的材料吗"
+    },
+    {
+      "id": "A18",
+      "role": "assistant",
+      "source": "本轮对话原文节录",
+      "content": "1. **看完日志对照，你怎么修正之前的判断？** 只改日志格式后，均匀数据的写入中位数从 656.1 降到 547.0 ms，正态数据却从 554.6 升到 564.5 ms，两种数据的日志都变小了。你现在会怎么解释官方掉分？如果还能做一次单变量对照，你会测什么，看到什么结果会改变判断？\n2. **你会怎样验证 `VARCHAR` 指纹碰撞？** 假设 `a` 和 `b` 的指纹相同，请给几行具体数据、一条带过滤的 TopK 查询和预期 ID 顺序。哪条错误输出最能说明程序把指纹当成了实际标签？\n3. **你会怎样验证低内存下的回退？** 同一批 128 维数据分别在默认设置和 48 MiB 地址空间限制下运行，后者会跳过量化缓存。你预期查询结果和耗时怎么变？你会核对什么，来确认程序走了回退路径且排名正确？"
+    },
+    {
+      "id": "U19",
+      "role": "user",
+      "source": "本轮对话原文",
+      "content": "三个问题都答在下面，同时我觉得你可以把我们之间的对话记录写进去。\n日志对照后，我修正前面的判断：官方掉分不能再简单归咎于“改日志一定把写入变慢”。只改日志格式后，日志都变小了，均匀数据写入还从 656.1 降到 547.0 ms，说明压缩或更紧的格式至少在这类数据上对写入有利；正态数据从 554.6 升到 564.5 ms，变化很小，更像波动或数据分布差异，不足以单独解释 E 从 4543.941928 掉到 3419.392588。我现在更怀疑查询路径或内存口径：本地查询变快，但官方 M 含页缓存、B 含装载和索引准备，量化缓存、映射或重建可能把内存或 I/O 抬高，把查询耗时上的收益吃掉。若还能做一次单变量对照，我会在同一二进制、同一数据上只关量化缓存或只关映射，固定种子和 10,000×128 / 1,000 次 Top10，同时看查询耗时、写入耗时、接近官方口径的 I/O 和峰值内存，以及排名、Recall@10。若关掉缓存后内存或 I/O 明显回落、正确性仍在，而开启时官方口径的 M 或 B 明显变差，我就把掉分主要归到查询侧缓存/映射，而不是日志格式；若关缓存后这些指标几乎不变，再去查别的查询改动。本地毫秒数仍不能直接换算成官方 E。\n验证 VARCHAR 指纹碰撞时，要让两个不同标签哈希成同一指纹，再用标签过滤。例如四行：`1,'a',[0,0]`，`2,'a',[3,4]`，`3,'b',[0,1]`，`4,'b',[0,0]`。这里 `a` 与 `b` 指纹相同，但标签不同。查询：`WHERE tag='a' ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2`。正确结果应是 `1,2`，不能出现 `3` 或 `4`。最能说明程序把指纹当成实际标签的错误输出是：结果里出现了 `4`（或 `3,4`），也就是把标签为 `b`、只是指纹碰巧相同的行当成了 `tag='a'`。若只是少返回 `2`，更像剪枝或排序问题，还不能直接证明把指纹当标签用了。\n同一批 128 维数据，默认设置走量化缓存，48 MiB 地址空间限制下会跳过该缓存、回退到更朴素的扫描。我预期两种设置下的查询 ID 顺序和距离应完全一致，排名不能因回退而改变；受限运行的查询耗时通常会变长，因为它少了剪枝加速，还可能更频繁地读原向量。要确认走了回退且排名正确，我会同时核对：受限进程确实没有建出或没有使用量化缓存（例如对应日志、调试计数，或缓存文件/内存结构未出现）；两组结果与暴力真值逐条一致，包括过滤、同距主键和更新后重查；受限运行没有 OOM、没有中途改回默认路径。只看到变慢还不够，必须是“变慢且结果与真值一致，并有证据表明缓存被跳过”。"
+    },
+    {
+      "id": "A19",
+      "role": "assistant",
+      "source": "本轮实测反馈原文",
+      "content": "三项验证都跑完了。关闭量化缓存后，两种负载的查询峰值内存都少了约 1.47 MiB，1,000 次查询的墙钟耗时变为原来的 6.5 到 7.4 倍，设备 I/O 变化很小。强制指纹碰撞后，`tag='a'` 仍返回 `1,2`。48 MiB 下的 528 次查询均走扫描路径，结果与穷举一致。"
     }
   ],
   "first_person_review": [
@@ -514,12 +539,16 @@
     },
     {
       "id": "R11",
-      "statement": "我先把日志和落盘改动作为掉分假设来检查。用同机、同一编译配置和同一输入，分别量写入、查询、设备 I/O 和峰值内存，同时核对正确性及 Recall@10。如果单独的存储改动造成明显写入或资源回退，或者破坏正确性，我会撤回它。如果隔离日志改动后，同口径的对照结果仍差，我再检查查询路径。E 以正式结果为准。",
+      "statement": "我最初把日志落盘当作掉分的首要怀疑，要求只改日志格式并做同口径对照。看到日志都变小、均匀数据写入更快、正态数据的变化较小后，我收回日志一定拖慢写入的判断。我优先检查查询路径和资源统计范围，提出在同一个二进制和同一份输入上只切换量化缓存或映射，同时核对写入、查询、设备 I/O、峰值内存和完整排名。若资源变化很小，我会继续检查别的查询改动。",
       "request_pointers": [
-        "/conversations/50/content"
+        "/conversations/50/content",
+        "/conversations/53/content"
       ],
       "result_pointers": [
-        "/experiments/17/output"
+        "/experiments/17/output",
+        "/experiments/20/output",
+        "/experiments/20/write_output",
+        "/experiments/20/correctness_output"
       ],
       "source": "由选手本轮原话整理的第一人称复盘",
       "student_evidence": [
@@ -530,12 +559,100 @@
         {
           "pointer": "/conversations/50/content",
           "excerpt": "本地秒数不能直接换算成官方 E，所以撤回标准是：在隔离后看到持久化或资源明显变差，或有正确性回退。"
+        },
+        {
+          "pointer": "/conversations/53/content",
+          "excerpt": "日志对照后，我修正前面的判断：官方掉分不能再简单归咎于“改日志一定把写入变慢”。"
+        },
+        {
+          "pointer": "/conversations/53/content",
+          "excerpt": "我现在更怀疑查询路径或内存口径：本地查询变快，但官方 M 含页缓存、B 含装载和索引准备，量化缓存、映射或重建可能把内存或 I/O 抬高，把查询耗时上的收益吃掉。"
+        },
+        {
+          "pointer": "/conversations/53/content",
+          "excerpt": "若还能做一次单变量对照，我会在同一二进制、同一数据上只关量化缓存或只关映射，固定种子和 10,000×128 / 1,000 次 Top10，同时看查询耗时、写入耗时、接近官方口径的 I/O 和峰值内存，以及排名、Recall@10。"
         }
       ],
       "result_evidence": [
         {
           "pointer": "/experiments/17/output",
           "excerpt": "各 6 轮交替，中位数按 MINIVDB2→MINIVDB3 排列。均匀写入 656.1→547.0 ms，查询 104.1→101.7 ms。高斯写入 554.6→564.5 ms，查询 109.4→109.4 ms。两个负载的日志均少 169,796 字节，所有轮的过滤与无过滤 Recall@10 均为 1.000。"
+        },
+        {
+          "pointer": "/experiments/20/output",
+          "excerpt": "量化缓存开→关。均匀数据的 1,000 次查询墙钟 113.02→729.55 ms，查询峰值内存 9.68→8.21 MiB，查询阶段设备 I/O 7692288→7708672 字节。正态数据的 1,000 次查询墙钟 140.84→1044.22 ms，查询峰值内存 9.68→8.21 MiB，查询阶段设备 I/O 7806976→7806976 字节。"
+        }
+      ],
+      "topic": "日志对照后的掉分归因修正"
+    },
+    {
+      "id": "R12",
+      "topic": "VARCHAR 指纹碰撞反例",
+      "source": "由本轮选手原话整理的第一人称复盘",
+      "statement": "我设计了 a、b 两组，各有一个到原点距离为零的向量。即使标签指纹相同，按 tag='a' 查询 Top2 也应该得到 1、2。标签为 b 的 id=4 出现在结果里能暴露标签判断错误。若只漏掉 id=2，我会再检查剪枝和排序。",
+      "request_pointers": [
+        "/conversations/53/content"
+      ],
+      "result_pointers": [
+        "/experiments/21/output",
+        "/experiments/21/route_output"
+      ],
+      "student_evidence": [
+        {
+          "pointer": "/conversations/53/content",
+          "excerpt": "例如四行：`1,'a',[0,0]`，`2,'a',[3,4]`，`3,'b',[0,1]`，`4,'b',[0,0]`。"
+        },
+        {
+          "pointer": "/conversations/53/content",
+          "excerpt": "正确结果应是 `1,2`，不能出现 `3` 或 `4`。"
+        },
+        {
+          "pointer": "/conversations/53/content",
+          "excerpt": "最能说明程序把指纹当成实际标签的错误输出是：结果里出现了 `4`（或 `3,4`），也就是把标签为 `b`、只是指纹碰巧相同的行当成了 `tag='a'`。"
+        }
+      ],
+      "result_evidence": [
+        {
+          "pointer": "/experiments/21/output",
+          "excerpt": "原二维 SQL 返回 tag='a' [[1,0],[2,5]]。643 行的强制碰撞组中，tag='a' 仍为 [[1,0],[2,5]]，tag='b' 为 [[4,0],[3,1]]，不存在的标签返回 []。无过滤结果为 [[1,0],[4,0],[3,1],[2,5]]。"
+        },
+        {
+          "pointer": "/experiments/21/route_output",
+          "excerpt": "mixed_fingerprint_bucket tag=0"
+        }
+      ]
+    },
+    {
+      "id": "R13",
+      "topic": "低内存下的缓存回退与正确性",
+      "source": "由本轮选手原话整理的第一人称复盘",
+      "statement": "我预计同一批 128 维数据在 48 MiB 限制下走扫描，两种模式的 ID 顺序和距离应一致。我会同时核对真实路径、过滤和主键并列、更新后重查以及 OOM 状态。我认为耗时可能上升，路径需要用日志或计数确认。",
+      "request_pointers": [
+        "/conversations/53/content"
+      ],
+      "result_pointers": [
+        "/experiments/22/output",
+        "/experiments/22/route_output",
+        "/experiments/22/resource_output"
+      ],
+      "student_evidence": [
+        {
+          "pointer": "/conversations/53/content",
+          "excerpt": "我预期两种设置下的查询 ID 顺序和距离应完全一致，排名不能因回退而改变；受限运行的查询耗时通常会变长，因为它少了剪枝加速，还可能更频繁地读原向量。"
+        },
+        {
+          "pointer": "/conversations/53/content",
+          "excerpt": "两组结果与暴力真值逐条一致，包括过滤、同距主键和更新后重查；受限运行没有 OOM、没有中途改回默认路径。"
+        }
+      ],
+      "result_evidence": [
+        {
+          "pointer": "/experiments/22/output",
+          "excerpt": "默认设置 528 次查询均走量化路径。48 MiB 设置 528 次均走扫描，全部排名及距离与穷举、默认组一致。过滤原点查询更新前前三名为 [[1,0],[2,5],[3,5]]，移远 id=2 后前两名为 [[1,0],[3,5]]。查询前后软硬上限均为 50331648 字节，OOM 计数为 0，正常退出。"
+        },
+        {
+          "pointer": "/experiments/22/route_output",
+          "excerpt": "cache_skipped address_limit=50331648\nquery_path=scan"
         }
       ]
     }
@@ -1577,15 +1694,764 @@
       },
       "rank_checks": "两种格式全部 24 次运行各匹配 1,000 个完整参考排名、校验 10,000 个返回距离并重启核对 10,000 行。",
       "finding": "紧凑帧在两种分布中均减少设备 I/O 和日志大小，cgroup 峰值相近或下降。均匀数据写入较快，高斯数据写入略慢，未观测到一致的持久化性能回退。目前数据只约束这一项变量，不能用来确定先前正式 E 差异的原因。查询路径和评测机资源仍需进一步独立对照。"
+    },
+    {
+      "id": "E19",
+      "topic": "优先精算量化候选的本地性能与资源对照",
+      "baseline_commit": "27de94de34ca4e07ee62e173ab7a94dba6fd7832",
+      "code_commit": "83d066f6e93f720cca283eaadb421f192464b039",
+      "source": "本地跨版本基准输出与独立穷举校验",
+      "historical_feedback": "选手转述 27de94d 的正式性能原始指标 E = 5278.180363。",
+      "method": "在同一台 WSL 主机的独立 ext4 数据设备上交替运行两版程序。每种分布各六对，每次装载 10,000 条 128 维向量，执行 1,000 次 Top10 查询，其中 500 次带等值过滤。独立穷举给出返回 ID 和距离的参考值。",
+      "output": "按基线→新版列出 1,000 次查询的墙钟中位数：均匀 114.86→105.72 ms，正态 126.70→111.16 ms，网格 107.38→107.00 ms，聚类 118.06→105.26 ms，六位小数 109.88→105.23 ms。新版 30,000 次 Top10 的 ID 顺序均与穷举一致，返回距离通过 1e-12 相对容差校验。",
+      "resource_output": "五种分布的查询 CPU 时间成对中位降幅为 13.7% 到 23.6%。查询阶段 cgroup 峰值内存的成对中位增幅最高为 2.2%。构建结束后单独跑写入，各分布八对，写入耗时成对中位变化为 −7.6% 到 +2.4%，40 对持久化日志逐字节一致。",
+      "verification_output": "handshake: PASS\nOfficial public samples: 20 cases, 95 statements passed\n600,000 narrow rows recovered from 38,419,405 bytes with a 27,262,976-byte address limit",
+      "limits": "测量来自本地环境。性能原始指标以平台锁定该提交后的正式结果为准。"
+    },
+    {
+      "id": "E20",
+      "topic": "VARCHAR 指纹碰撞与无 VNNI 的精确查询回归",
+      "code_commit": "83d066f6e93f720cca283eaadb421f192464b039",
+      "source": "本地诊断构建和 ASan/UBSan 回归的标准输出",
+      "method": "只在诊断副本中令所有 VARCHAR 过滤值返回相同指纹，并令点积内核选择 AVX2 路径。使用属于两个不同标签的 643 条 128 维记录，其中包含量化距离相同的记录。测试检查带过滤和无过滤的 K 为 1、10、16、17 的完整顺序、缺失标签、主键范围、回滚和重启。",
+      "output": "Quantized shortlist: rank ties, partial blocks, VARCHAR equality, rollback and restart passed\nGrouped distance bounds: full-radius outlier, cross-group ties, update and restart passed\nAVX2 paired dot product and forced VARCHAR fingerprint collision passed under ASan/UBSan",
+      "limits": "人为强制指纹相等是回归的构造输入。输出来自真实运行，诊断改动仅在临时副本中使用。"
+    },
+    {
+      "id": "E21",
+      "topic": "日志归因调整后的量化缓存单变量对照",
+      "code_commit": "83d066f6e93f720cca283eaadb421f192464b039",
+      "source": "本地诊断二进制的真实基准输出和独立穷举校验",
+      "diagnostic_binary_sha256": "b856d1a78b2a7bd192ebad1cc640120b0e92b6ea9a421e4e4a6e11c2bdbb69ea",
+      "method": "同一个 GCC 13.3.0 诊断二进制在同一台 WSL 主机交替运行。仅切换是否构建并使用量化候选缓存，保留原有日志格式、映射、提交同步和查询语义。每种分布四对，各装载 10,000 条 128 维数据并创建索引，预热 8 次后计时 1,000 次 Top10，其中 500 次带等值过滤。另以独立数据目录测量 100 批各 100 行的持久化写入。诊断跟踪仅在功能验证时启用。",
+      "dataset": "Python Random 固定种子 171701 和 171702，分别生成 [-1,1] 均匀和均值 0、标准差 0.3 的正态 float32 向量。主键独立乱序，10 个等值过滤值。用独立 C++ 程序逐行算距离并按主键打破并列。",
+      "resource_scope": "写入和查询分别用独立 cgroup。峰值取 memory.peak，包含该组的文件页缓存。I/O 取独立 ext4 loop 设备的读写扇区计数，查询阶段从进程启动到装载、建索引、预热、全部查询及写回结束。",
+      "output": "量化缓存开→关。均匀数据的 1,000 次查询墙钟 113.02→729.55 ms，查询峰值内存 9.68→8.21 MiB，查询阶段设备 I/O 7692288→7708672 字节。正态数据的 1,000 次查询墙钟 140.84→1044.22 ms，查询峰值内存 9.68→8.21 MiB，查询阶段设备 I/O 7806976→7806976 字节。",
+      "write_output": "量化缓存开→关。均匀数据的 100 批持久化写入中位数 761.49→773.12 ms，写入阶段设备 I/O 7665664→7788544 字节，写入峰值内存 7.94→7.94 MiB。正态数据的 100 批持久化写入中位数 910.71→975.41 ms，写入阶段设备 I/O 7677952→7677952 字节，写入峰值内存 7.93→7.94 MiB。",
+      "correctness_output": "两种分布共 16 轮，16,000 次 Top10 的 ID 顺序符合独立穷举，逐条距离通过 1e-12 相对容差。过滤与无过滤两组 Recall@10 均为 1.000。8 对写入生成的日志逐字节一致，重启后每组保留 10,000 条主键。",
+      "measurements": [
+        {
+          "shape": "uniform",
+          "seed": 171701,
+          "rounds": 4,
+          "cache_on": {
+            "write_ms": 761.490594,
+            "write_io_bytes": 7665664.0,
+            "write_peak_bytes": 8325120.0,
+            "prepare_ms": 760.584226,
+            "query_ms": 113.0203585,
+            "query_cpu_us": 46762.5,
+            "query_io_bytes": 7692288.0,
+            "query_peak_bytes": 10153984.0,
+            "filtered_recall_at_10": 1.0,
+            "unfiltered_recall_at_10": 1.0,
+            "exact_rank_matches": 1000.0
+          },
+          "cache_off": {
+            "write_ms": 773.121108,
+            "write_io_bytes": 7788544.0,
+            "write_peak_bytes": 8323072.0,
+            "prepare_ms": 874.0307885,
+            "query_ms": 729.5497065,
+            "query_cpu_us": 595388.5,
+            "query_io_bytes": 7708672.0,
+            "query_peak_bytes": 8605696.0,
+            "filtered_recall_at_10": 1.0,
+            "unfiltered_recall_at_10": 1.0,
+            "exact_rank_matches": 1000.0
+          },
+          "identical_log_pairs": 4,
+          "samples": {
+            "cache_on": [
+              {
+                "write_ms": 636.459022,
+                "write_io_bytes": 7532544,
+                "write_peak_bytes": 8327168,
+                "prepare_ms": 759.663315,
+                "query_ms": 113.765338,
+                "query_cpu_us": 46905,
+                "query_io_bytes": 7565312,
+                "query_peak_bytes": 10235904,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1c111032c747f9c95c477a7713058ddd3828052083cc685db1b95353921d1b2a"
+              },
+              {
+                "write_ms": 870.17479,
+                "write_io_bytes": 7540736,
+                "write_peak_bytes": 8323072,
+                "prepare_ms": 755.194278,
+                "query_ms": 109.909041,
+                "query_cpu_us": 46620,
+                "query_io_bytes": 7819264,
+                "query_peak_bytes": 10153984,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1c111032c747f9c95c477a7713058ddd3828052083cc685db1b95353921d1b2a"
+              },
+              {
+                "write_ms": 668.500811,
+                "write_io_bytes": 7790592,
+                "write_peak_bytes": 8421376,
+                "prepare_ms": 761.505137,
+                "query_ms": 119.155994,
+                "query_cpu_us": 48848,
+                "query_io_bytes": 7819264,
+                "query_peak_bytes": 10022912,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1c111032c747f9c95c477a7713058ddd3828052083cc685db1b95353921d1b2a"
+              },
+              {
+                "write_ms": 854.480377,
+                "write_io_bytes": 7790592,
+                "write_peak_bytes": 8318976,
+                "prepare_ms": 793.207493,
+                "query_ms": 112.275379,
+                "query_cpu_us": 46322,
+                "query_io_bytes": 7565312,
+                "query_peak_bytes": 10153984,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1c111032c747f9c95c477a7713058ddd3828052083cc685db1b95353921d1b2a"
+              }
+            ],
+            "cache_off": [
+              {
+                "write_ms": 804.452252,
+                "write_io_bytes": 7798784,
+                "write_peak_bytes": 8327168,
+                "prepare_ms": 923.272706,
+                "query_ms": 763.179778,
+                "query_cpu_us": 622090,
+                "query_io_bytes": 7872512,
+                "query_peak_bytes": 8585216,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1c111032c747f9c95c477a7713058ddd3828052083cc685db1b95353921d1b2a"
+              },
+              {
+                "write_ms": 878.365243,
+                "write_io_bytes": 7786496,
+                "write_peak_bytes": 8323072,
+                "prepare_ms": 824.788871,
+                "query_ms": 842.931621,
+                "query_cpu_us": 686312,
+                "query_io_bytes": 7565312,
+                "query_peak_bytes": 8622080,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1c111032c747f9c95c477a7713058ddd3828052083cc685db1b95353921d1b2a"
+              },
+              {
+                "write_ms": 741.789964,
+                "write_io_bytes": 7540736,
+                "write_peak_bytes": 8323072,
+                "prepare_ms": 933.359952,
+                "query_ms": 690.420603,
+                "query_cpu_us": 566000,
+                "query_io_bytes": 7598080,
+                "query_peak_bytes": 8589312,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1c111032c747f9c95c477a7713058ddd3828052083cc685db1b95353921d1b2a"
+              },
+              {
+                "write_ms": 686.511756,
+                "write_io_bytes": 7790592,
+                "write_peak_bytes": 8318976,
+                "prepare_ms": 708.924895,
+                "query_ms": 695.919635,
+                "query_cpu_us": 568687,
+                "query_io_bytes": 7819264,
+                "query_peak_bytes": 8658944,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1c111032c747f9c95c477a7713058ddd3828052083cc685db1b95353921d1b2a"
+              }
+            ]
+          }
+        },
+        {
+          "shape": "gaussian",
+          "seed": 171702,
+          "rounds": 4,
+          "cache_on": {
+            "write_ms": 910.7115375,
+            "write_io_bytes": 7677952.0,
+            "write_peak_bytes": 8316928.0,
+            "prepare_ms": 942.2203985,
+            "query_ms": 140.84490399999999,
+            "query_cpu_us": 55322.5,
+            "query_io_bytes": 7806976.0,
+            "query_peak_bytes": 10151936.0,
+            "filtered_recall_at_10": 1.0,
+            "unfiltered_recall_at_10": 1.0,
+            "exact_rank_matches": 1000.0
+          },
+          "cache_off": {
+            "write_ms": 975.4067075,
+            "write_io_bytes": 7677952.0,
+            "write_peak_bytes": 8321024.0,
+            "prepare_ms": 1067.4363825,
+            "query_ms": 1044.2195265,
+            "query_cpu_us": 788234.0,
+            "query_io_bytes": 7806976.0,
+            "query_peak_bytes": 8613888.0,
+            "filtered_recall_at_10": 1.0,
+            "unfiltered_recall_at_10": 1.0,
+            "exact_rank_matches": 1000.0
+          },
+          "identical_log_pairs": 4,
+          "samples": {
+            "cache_on": [
+              {
+                "write_ms": 896.215257,
+                "write_io_bytes": 7544832,
+                "write_peak_bytes": 8310784,
+                "prepare_ms": 778.07341,
+                "query_ms": 126.573246,
+                "query_cpu_us": 50405,
+                "query_io_bytes": 7806976,
+                "query_peak_bytes": 10186752,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1327e0336dac26c4ac54d9263c86a1cf7f3279847dd5379b997fecc667eea5b2"
+              },
+              {
+                "write_ms": 1004.74511,
+                "write_io_bytes": 7794688,
+                "write_peak_bytes": 8318976,
+                "prepare_ms": 1214.005222,
+                "query_ms": 189.922005,
+                "query_cpu_us": 75115,
+                "query_io_bytes": 7831552,
+                "query_peak_bytes": 10149888,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1327e0336dac26c4ac54d9263c86a1cf7f3279847dd5379b997fecc667eea5b2"
+              },
+              {
+                "write_ms": 925.207818,
+                "write_io_bytes": 7790592,
+                "write_peak_bytes": 8314880,
+                "prepare_ms": 1016.500357,
+                "query_ms": 134.696602,
+                "query_cpu_us": 53486,
+                "query_io_bytes": 7557120,
+                "query_peak_bytes": 10153984,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1327e0336dac26c4ac54d9263c86a1cf7f3279847dd5379b997fecc667eea5b2"
+              },
+              {
+                "write_ms": 867.399488,
+                "write_io_bytes": 7565312,
+                "write_peak_bytes": 8323072,
+                "prepare_ms": 867.94044,
+                "query_ms": 146.993206,
+                "query_cpu_us": 57159,
+                "query_io_bytes": 7806976,
+                "query_peak_bytes": 10149888,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1327e0336dac26c4ac54d9263c86a1cf7f3279847dd5379b997fecc667eea5b2"
+              }
+            ],
+            "cache_off": [
+              {
+                "write_ms": 829.143082,
+                "write_io_bytes": 7794688,
+                "write_peak_bytes": 8318976,
+                "prepare_ms": 1071.365666,
+                "query_ms": 995.942124,
+                "query_cpu_us": 750320,
+                "query_io_bytes": 7806976,
+                "query_peak_bytes": 8683520,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1327e0336dac26c4ac54d9263c86a1cf7f3279847dd5379b997fecc667eea5b2"
+              },
+              {
+                "write_ms": 1216.473277,
+                "write_io_bytes": 7565312,
+                "write_peak_bytes": 8323072,
+                "prepare_ms": 1063.507099,
+                "query_ms": 1092.496929,
+                "query_cpu_us": 826148,
+                "query_io_bytes": 7557120,
+                "query_peak_bytes": 8581120,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1327e0336dac26c4ac54d9263c86a1cf7f3279847dd5379b997fecc667eea5b2"
+              },
+              {
+                "write_ms": 964.123672,
+                "write_io_bytes": 7544832,
+                "write_peak_bytes": 8323072,
+                "prepare_ms": 1165.769868,
+                "query_ms": 1100.755923,
+                "query_cpu_us": 840052,
+                "query_io_bytes": 7843840,
+                "query_peak_bytes": 8577024,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1327e0336dac26c4ac54d9263c86a1cf7f3279847dd5379b997fecc667eea5b2"
+              },
+              {
+                "write_ms": 986.689743,
+                "write_io_bytes": 7790592,
+                "write_peak_bytes": 8318976,
+                "prepare_ms": 943.880181,
+                "query_ms": 925.499008,
+                "query_cpu_us": 704457,
+                "query_io_bytes": 7806976,
+                "query_peak_bytes": 8646656,
+                "filtered_recall_at_10": 1.0,
+                "unfiltered_recall_at_10": 1.0,
+                "exact_rank_matches": 1000,
+                "write_log_sha256": "1327e0336dac26c4ac54d9263c86a1cf7f3279847dd5379b997fecc667eea5b2"
+              }
+            ]
+          }
+        }
+      ],
+      "finding": "关闭缓存后，两种负载的查询阶段峰值内存少约 1.47 MiB，查询墙钟增至原来的约 6.5 至 7.4 倍，设备 I/O 接近。该结果给出 83d066f 在这两种本地负载中的时间与内存取舍。c86f54b 和 08f6be2 的正式 E 差异仍须结合两个历史版本及平台的分项数据核对。"
+    },
+    {
+      "id": "E22",
+      "topic": "选手四行 VARCHAR 过滤反例和强制碰撞复测",
+      "code_commit": "83d066f6e93f720cca283eaadb421f192464b039",
+      "source": "本地真实 SQL 响应和诊断 stderr",
+      "input": "原例 (1,'a',[0,0])、(2,'a',[3,4])、(3,'b',[0,1])、(4,'b',[0,0])。按选手查询检查 tag='a' 的 Top2，另对 tag='b'、不存在的标签和无过滤顺序作交叉检查。",
+      "method": "先原样执行二维四行用例。然后把每行补零到 128 维，增加主键 5 至 643 的远向量，让分组缓存具备构建条件。对同一份高维数据分别使用原指纹和诊断副本的常量指纹。远向量前两维为 10+id%7 和 10+id%11，标签按主键奇偶在 a 与 b 中选择。",
+      "output": "原二维 SQL 返回 tag='a' [[1,0],[2,5]]。643 行的强制碰撞组中，tag='a' 仍为 [[1,0],[2,5]]，tag='b' 为 [[4,0],[3,1]]，不存在的标签返回 []。无过滤结果为 [[1,0],[4,0],[3,1],[2,5]]。",
+      "route_output": "log_mapped bytes=190090\nmixed_fingerprint_bucket tag=0\ncache_built rows=643 dimensions=128 bytes=90760\nquery_path=quantized\nquery_path=quantized\nquery_path=quantized\nquery_path=quantized",
+      "actual_responses": {
+        "2d_normal": {
+          "row_count": 4,
+          "tag_a": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "tag_b": [
+            [
+              4,
+              0
+            ],
+            [
+              3,
+              1
+            ]
+          ],
+          "missing": [],
+          "unfiltered": [
+            [
+              1,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "trace": [
+            "log_mapped bytes=329",
+            "query_path=scan",
+            "query_path=scan",
+            "query_path=scan",
+            "query_path=scan"
+          ]
+        },
+        "128d_normal": {
+          "row_count": 643,
+          "tag_a": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "tag_b": [
+            [
+              4,
+              0
+            ],
+            [
+              3,
+              1
+            ]
+          ],
+          "missing": [],
+          "unfiltered": [
+            [
+              1,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "trace": [
+            "log_mapped bytes=190090",
+            "cache_built rows=643 dimensions=128 bytes=90800",
+            "query_path=quantized",
+            "query_path=quantized",
+            "query_path=quantized",
+            "query_path=quantized"
+          ]
+        },
+        "128d_forced_collision": {
+          "row_count": 643,
+          "tag_a": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "tag_b": [
+            [
+              4,
+              0
+            ],
+            [
+              3,
+              1
+            ]
+          ],
+          "missing": [],
+          "unfiltered": [
+            [
+              1,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              2,
+              5
+            ]
+          ],
+          "trace": [
+            "log_mapped bytes=190090",
+            "mixed_fingerprint_bucket tag=0",
+            "cache_built rows=643 dimensions=128 bytes=90760",
+            "query_path=quantized",
+            "query_path=quantized",
+            "query_path=quantized",
+            "query_path=quantized"
+          ]
+        }
+      },
+      "limits": "原二维例走普通扫描。高维日志证实命中混合标签桶并使用量化路径。常量指纹只用于本地诊断。"
+    },
+    {
+      "id": "E23",
+      "topic": "48 MiB 地址空间下的精确查询迁移验证",
+      "code_commit": "83d066f6e93f720cca283eaadb421f192464b039",
+      "source": "进程实际地址空间限制、SQL 响应、独立整数平方和与诊断 stderr",
+      "method": "同一台机器和同一个诊断可执行文件，分别以默认地址空间和软硬上限均为 48 MiB 启动。使用同样的 1,053 行 128 维整数数据，每组先验证四个查询向量的过滤与无过滤 Top10，再更新实际入选的 id=2 向量并重复。逐条按独立整数平方和、主键顺序和距离验证。用进程 limits 文件在查询前后核对限制，用 cgroup memory.events 检查 OOM。计时覆盖每段 64 次稳态查询，八段取中位数，启用了相同的诊断跟踪。",
+      "output": "默认设置 528 次查询均走量化路径。48 MiB 设置 528 次均走扫描，全部排名及距离与穷举、默认组一致。过滤原点查询更新前前三名为 [[1,0],[2,5],[3,5]]，移远 id=2 后前两名为 [[1,0],[3,5]]。查询前后软硬上限均为 50331648 字节，OOM 计数为 0，正常退出。",
+      "route_output": "log_mapped bytes=314359\ncache_skipped address_limit=50331648\nquery_path=scan\nlog_mapped bytes=314425",
+      "resource_output": "默认→48 MiB。每 64 次稳态查询中位耗时 23.64→23.91 ms。cgroup 峰值 3444736→3207168 字节。该固定负载两组耗时接近，路径以跟踪记录确认。",
+      "result_rows": [
+        [
+          [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              5
+            ],
+            [
+              3,
+              5
+            ],
+            [
+              189,
+              15.748015748023622
+            ],
+            [
+              819,
+              15.905973720586866
+            ],
+            [
+              378,
+              16.1245154965971
+            ],
+            [
+              154,
+              16.34013463836819
+            ],
+            [
+              918,
+              16.401219466856727
+            ],
+            [
+              1008,
+              16.401219466856727
+            ],
+            [
+              477,
+              16.431676725154983
+            ]
+          ],
+          [
+            [
+              1,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              2,
+              5
+            ],
+            [
+              3,
+              5
+            ],
+            [
+              630,
+              15.652475842498529
+            ],
+            [
+              189,
+              15.748015748023622
+            ],
+            [
+              819,
+              15.905973720586866
+            ],
+            [
+              378,
+              16.1245154965971
+            ],
+            [
+              595,
+              16.30950643030009
+            ],
+            [
+              154,
+              16.34013463836819
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              1,
+              0
+            ],
+            [
+              3,
+              5
+            ],
+            [
+              189,
+              15.748015748023622
+            ],
+            [
+              819,
+              15.905973720586866
+            ],
+            [
+              378,
+              16.1245154965971
+            ],
+            [
+              154,
+              16.34013463836819
+            ],
+            [
+              918,
+              16.401219466856727
+            ],
+            [
+              1008,
+              16.401219466856727
+            ],
+            [
+              477,
+              16.431676725154983
+            ],
+            [
+              784,
+              16.431676725154983
+            ]
+          ],
+          [
+            [
+              1,
+              0
+            ],
+            [
+              4,
+              0
+            ],
+            [
+              3,
+              5
+            ],
+            [
+              630,
+              15.652475842498529
+            ],
+            [
+              189,
+              15.748015748023622
+            ],
+            [
+              819,
+              15.905973720586866
+            ],
+            [
+              378,
+              16.1245154965971
+            ],
+            [
+              595,
+              16.30950643030009
+            ],
+            [
+              154,
+              16.34013463836819
+            ],
+            [
+              918,
+              16.401219466856727
+            ]
+          ]
+        ]
+      ],
+      "observations": {
+        "default": {
+          "limits": [
+            "unlimited",
+            "unlimited"
+          ],
+          "wall_64_queries_ms": 23.6359145,
+          "cgroup_peak": 3444736,
+          "oom": 0,
+          "clean_exit": true,
+          "query_paths": {
+            "quantized": 528,
+            "scan": 0
+          },
+          "route_excerpt": [
+            "log_mapped bytes=314359",
+            "cache_built rows=1053 dimensions=128 bytes=147936",
+            "query_path=quantized",
+            "log_mapped bytes=314425"
+          ]
+        },
+        "48_MiB": {
+          "limits": [
+            "50331648",
+            "50331648"
+          ],
+          "wall_64_queries_ms": 23.913398,
+          "cgroup_peak": 3207168,
+          "oom": 0,
+          "clean_exit": true,
+          "query_paths": {
+            "quantized": 0,
+            "scan": 528
+          },
+          "route_excerpt": [
+            "log_mapped bytes=314359",
+            "cache_skipped address_limit=50331648",
+            "query_path=scan",
+            "log_mapped bytes=314425"
+          ]
+        },
+        "diagnostic_toggle": {
+          "limits": [
+            "unlimited",
+            "unlimited"
+          ],
+          "wall_64_queries_ms": 23.8333105,
+          "cgroup_peak": 3194880,
+          "oom": 0,
+          "clean_exit": true,
+          "query_paths": {
+            "quantized": 0,
+            "scan": 528
+          },
+          "route_excerpt": [
+            "log_mapped bytes=314359",
+            "cache_skipped toggle=off",
+            "query_path=scan",
+            "log_mapped bytes=314425"
+          ]
+        }
+      },
+      "limits": "两组日志均可映射。受限组触发原有地址空间分支，额外的仅关缓存模式作为路径交叉检查。小表耗时的差异对应这个固定负载。"
     }
   ],
   "verification_limits": [
     "截图记录的是历史对话。4cd0dfe 的平台 E 为 2797.430116，faf9d110 的平台 E 为 3152.922828，3dfd062 的平台 E 为 4427.302903，分别取自用户反馈。",
     "c2c49535 对应程序的公开检查、压力回归和性能对照来自本地。平台保留用例、E 和 Prompt 评审结果以锁定提交的正式反馈为准。",
     "平台之前的 Prompt 合并提示没有列出具体触发条件。",
-    "本轮复测绑定 168d1fd 的源码。设备 I/O 来自隔离的本地 ext4 loop 设备，峰值来自 cgroup v2。官方 E 和 Agent Prompt 分数仍以平台锁定的新提交结果为准。"
+    "本轮复测绑定 168d1fd 的源码。设备 I/O 来自隔离的本地 ext4 loop 设备，峰值来自 cgroup v2。官方 E 和 Agent Prompt 分数仍以平台锁定的新提交结果为准。",
+    "最新三项诊断基于 83d066f。归档的原版源码编译后通过官方握手和 20 组公开用例。本地诊断数据记录该版本的验证结果，正式 E 和 Agent Prompt 原始评价分以平台锁定版本的结果为准。"
   ],
-  "coverage": "新增同距预测修正、改动结果内记录后的回滚复测、提交请求发出与收到回复之间的原子性检查，以及同一可执行程序内切换两种日志帧格式的单变量对照。保留原有量化剪枝、写后读和恢复测试记录。",
+  "coverage": "新增同距预测修正、改动结果内记录后的回滚复测、提交请求发出与收到回复之间的原子性检查，以及同一可执行程序内切换两种日志帧格式的单变量对照。保留原有量化剪枝、写后读和恢复测试记录。补入日志归因修正与缓存对照、VARCHAR 指纹碰撞反例、48 MiB 下的路径跟踪和完整排名校验。",
   "screenshot_evidence": [
     {
       "id": "S01",
