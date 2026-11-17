@@ -1,6 +1,7 @@
 #include "sql.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
@@ -23,6 +24,38 @@ bool space(char ch) {
   return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f';
 }
 bool digit(char ch) { return ch >= '0' && ch <= '9'; }
+
+const char* fixed_decimal(const char* first, const char* start, const char* last, float& output) {
+  if constexpr (std::endian::native != std::endian::little) return nullptr;
+  if (last - start <= 10 || !digit(start[0]) || start[1] != '.') return nullptr;
+  uint64_t bytes;
+  std::memcpy(&bytes, start + 2, sizeof(bytes));
+  // Earlier digits borrow or carry nothing into the first nondigit byte.
+  const auto nondigits = ((bytes + 0x4646464646464646ull) | (bytes - 0x3030303030303030ull)) &
+                         0x8080808080808080ull;
+  const size_t digits = std::countr_zero(nondigits) / 8;
+  if (!digits) return nullptr;
+  const char* end = start + 2 + digits;
+  uint64_t units = bytes & 0x0f0f0f0f0f0f0f0full & (~uint64_t{0} >> (64 - 8 * digits));
+  units = (units * 10 + (units >> 8)) & 0x00ff00ff00ff00ffull;
+  units = (units * 100 + (units >> 16)) & 0x0000ffff0000ffffull;
+  units = (units * 10000 + (units >> 32)) & 0xffffffffull;
+  units += static_cast<unsigned>(start[0] - '0') * 100000000ull;
+  double step = 1e-8;
+  if (digits == 8 && digit(*end)) {
+    units = units * 10 + static_cast<unsigned>(*end - '0');
+    ++end;
+    step = 1e-9;
+  }
+  if (end == last || (*end != ',' && *end != ']' && !space(*end))) return nullptr;
+  // These decimals are separated from every binary32 midpoint by more
+  // than binary64 conversion error (up to nine powers of five in the
+  // denominator). Dyadic values here have at most nine fractional bits.
+  const float value = static_cast<float>(static_cast<double>(units) * step);
+  output = *first == '-' ? -value : value;
+  return end;
+}
+
 bool letter(char ch) {
   return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
 }
@@ -507,19 +540,23 @@ std::vector<float> vector_value(const Literal& value, uint32_t dimension) {
       if (start == last || (!digit(*start) && *start != '.')) {
         throw SqlError("VALUE", "invalid vector component");
       }
-      const auto converted = std::from_chars(*first == '+' ? first + 1 : first, last, component);
-      if (converted.ec == std::errc::result_out_of_range) {
-        const std::string token(first, converted.ptr);
-        char* tail = nullptr;
-        component = std::strtof(token.c_str(), &tail);
-        if (tail != token.data() + token.size()) throw SqlError("VALUE", "invalid vector component");
-      } else if (converted.ec != std::errc{}) {
-        throw SqlError("VALUE", "invalid vector component");
+      const char* end = fixed_decimal(first, start, last, component);
+      if (!end) {
+        const auto converted = std::from_chars(*first == '+' ? first + 1 : first, last, component);
+        if (converted.ec == std::errc::result_out_of_range) {
+          const std::string token(first, converted.ptr);
+          char* tail = nullptr;
+          component = std::strtof(token.c_str(), &tail);
+          if (tail != token.data() + token.size()) throw SqlError("VALUE", "invalid vector component");
+        } else if (converted.ec != std::errc{}) {
+          throw SqlError("VALUE", "invalid vector component");
+        }
+        end = converted.ptr;
       }
       if (!std::isfinite(component)) throw SqlError("VALUE", "nonfinite float32 component");
       if (count < dimension) result.push_back(component);
       ++count;
-      pos = converted.ptr - text.data();
+      pos = end - text.data();
     } while (consume(','));
     if (!consume(']')) throw SqlError("VALUE", "invalid vector syntax");
   }

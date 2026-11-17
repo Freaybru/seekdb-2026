@@ -366,11 +366,11 @@ def packed_storage(binary, root):
             assert binary32(json.loads(vector, parse_int=float)) == binary32(values[key]), key
             assert body == labels[key] and int(tag) == key % 2
 
-    for version in (1, 2, 3):
+    for version in (1, 2, 3, 4):
         folder = root / f'v{version}'
         folder.mkdir(parents=True)
         log = folder / 'minivectordb.log'
-        if version != 2:
+        if version != 4:
             log.write_bytes(f'MINIVDB{version}'.encode('ascii'))
         with Session(binary, folder) as db:
             db.ok(f'CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR({size}), body VARCHAR(8), tag BIGINT)')
@@ -426,7 +426,55 @@ def packed_storage(binary, root):
             assert records[1][0]==6 and int.from_bytes(records[1][2],'little') & 0x8000
             assert records[2][0]==6 and not int.from_bytes(records[2][2],'little') & 0x8000
             assert records[3][0]==3
-    print('Lossless float32 storage: v1/v2 compatibility, compact frames, indexed filters, rollback and crash recovery passed')
+    print('Lossless float32 storage: v1 through v4, indexed filters, rollback and crash recovery passed')
+
+
+def decimal_storage(binary, root):
+    dimension = 129
+    vectors = {
+        1: [(-1)**i * (13 + (i * 17) % 110) / 100 for i in range(dimension)],
+        2: [(-1)**i * (5273 + (i * 137) % 24000) / 10000 for i in range(dimension)],
+        3: [(-1)**i * (654321 + (i * 1367) % 900000) / 1000000 for i in range(dimension)],
+    }
+
+    def check(db):
+        for key, stored in db.query('SELECT id,v FROM t ORDER BY id'):
+            value = json.loads(stored, parse_int=float)
+            assert array('f', value).tobytes() == array('f', vectors[int(key)]).tobytes(), key
+        for key, value in vectors.items():
+            assert db.query(f"SELECT id FROM t ORDER BY L2_DISTANCE(v,'{json.dumps(value)}') LIMIT 1") == [[str(key)]]
+
+    with Session(binary, root) as db:
+        db.ok(f'CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR({dimension}))')
+        rows = ','.join(f"({key},'{json.dumps(v)}')" for key,v in vectors.items())
+        db.ok('INSERT INTO t VALUES '+rows, len(vectors))
+        db.ok('CREATE VECTOR INDEX i ON t(v)')
+        check(db)
+        db.ok('BEGIN')
+        db.ok(f"UPDATE t SET v='{json.dumps(vectors[3])}' WHERE id=1", 1)
+        db.ok('DELETE FROM t WHERE id=2', 1)
+        db.ok('ROLLBACK')
+        check(db)
+        db.kill()
+    with Session(binary, root) as db:
+        db.ok('MODE ann')
+        check(db)
+        db.quit()
+    data = (root / 'minivectordb.log').read_bytes()
+    assert data.startswith(b'MINIVDB4')
+    cursor = 8
+    widths = {}
+    while cursor < len(data):
+        length, op, _, key, _ = struct.unpack_from('<IIIqQ', data, cursor)
+        if op == 6:
+            prefix, descriptor = struct.unpack_from('<HB', data, cursor + 28)
+            assert prefix & 0x4000 and not prefix & 0x8000
+            width = descriptor & 3
+            assert (prefix & 0x3fff) == 3 + width * dimension
+            widths[key] = width
+        cursor += length + 32
+    assert cursor == len(data) and widths == {1: 1, 2: 2, 3: 3}, widths
+    print('Decimal vectors: three code widths, bit-exact rollback, partial SIMD block and indexed restart passed')
 
 
 def script_input(binary, root):
@@ -1051,6 +1099,33 @@ def shortlist_bounds(binary, root):
     print('Quantized shortlist: rank ties, partial blocks, VARCHAR equality, rollback and restart passed')
 
 
+def many_filter_groups(binary, root):
+    count, groups = 1426, 713
+
+    def vector(value):
+        return json.dumps([value] + [0] * 127)
+
+    def query(tag):
+        return f"SELECT id FROM t WHERE tag='{tag}' ORDER BY L2_DISTANCE(v,'{vector(0)}') LIMIT 3"
+
+    with Session(binary, root) as db:
+        db.ok('CREATE TABLE t (id BIGINT PRIMARY KEY, tag VARCHAR(16), v VECTOR(128))')
+        for start in range(0, count, 80):
+            keys = range(start, min(count, start+80))
+            rows = ','.join(f"({key},'组{key%groups}','{vector(key%10-5)}')" for key in keys)
+            db.ok('INSERT INTO t VALUES '+rows, len(keys))
+        assert db.query(query('组612')) == [['1325'], ['612']]
+        assert db.query(query('新组')) == []
+        db.ok('BEGIN')
+        db.ok("UPDATE t SET tag='新组' WHERE id=1325", 1)
+        assert db.query(query('组612')) == [['612']]
+        assert db.query(query('新组')) == [['1325']]
+        db.ok('ROLLBACK')
+        assert db.query(query('组612')) == [['1325'], ['612']]
+        db.quit()
+    print('713 VARCHAR groups: filtered order, tag update and rollback passed')
+
+
 def benchmark(binary, root):
     rng = random.Random(382901)
     dimension, size, k = 128, 10_000, 10
@@ -1125,6 +1200,7 @@ def main():
         vector_syntax(binary, root / "vector-syntax")
         functional(binary, root / "sql")
         packed_storage(binary, root / "packed-storage")
+        decimal_storage(binary, root / "decimal-storage")
         script_input(binary, root / "framing")
         paged_mutations(binary, root / "directory")
         atomicity(binary, root / "atomic")
@@ -1136,6 +1212,7 @@ def main():
         quantized_ties(binary, root / "quantized-ties")
         grouped_distance_bounds(binary, root / "grouped-bounds")
         shortlist_bounds(binary, root / "shortlist")
+        many_filter_groups(binary, root / "filter-groups")
         bounded_memory(binary, root / "large")
         indexed_memory(binary, root / "index-memory")
         if options.stress:
