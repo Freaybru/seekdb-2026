@@ -19,9 +19,10 @@ namespace {
 constexpr std::string_view legacy_magic = "MINIVDB1";
 constexpr std::string_view packed_magic = "MINIVDB2";
 constexpr std::string_view decimal_magic = "MINIVDB4";
+constexpr std::string_view dyadic_magic = "MINIVDB5";
 constexpr std::string_view magic = "MINIVDB3";
 static_assert(magic.size() == Log::start && packed_magic.size() == Log::start && legacy_magic.size() == Log::start);
-static_assert(decimal_magic.size() == Log::start);
+static_assert(decimal_magic.size() == Log::start && dyadic_magic.size() == Log::start);
 constexpr uint32_t header_size = Frame::header_size;
 constexpr uint32_t frame_overhead = header_size + sizeof(uint32_t);
 constexpr uint8_t compact_insert = 0x80;
@@ -71,9 +72,10 @@ Log::Log(const std::filesystem::path& directory) {
     disk_end_ = static_cast<uint64_t>(info.st_size);
     if (disk_end_ < start) {
       // No frame can exist if initialization was interrupted here.
-      write_disk(0, decimal_magic);
+      write_disk(0, dyadic_magic);
       packed_rows_ = true;
       decimal_vectors_ = true;
+      compact_frames_ = true;
       disk_end_ = start;
       sync_file(fd_);
       const int dir = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -87,8 +89,8 @@ Log::Log(const std::filesystem::path& directory) {
       if (result < 0) throw std::system_error(error, std::generic_category(), "sync data directory");
     } else {
       const auto version = read(0, start);
-      compact_frames_ = version == magic;
-      decimal_vectors_ = version == decimal_magic;
+      compact_frames_ = version == magic || version == dyadic_magic;
+      decimal_vectors_ = version == decimal_magic || version == dyadic_magic;
       packed_rows_ = compact_frames_ || decimal_vectors_ || version == packed_magic;
       if (!packed_rows_ && version != legacy_magic) throw std::runtime_error("unknown log format");
     }

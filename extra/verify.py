@@ -343,6 +343,29 @@ def vector_syntax(binary, root):
     print("Quoted SQL, decimal and exponent syntax, and invalid float32 writes: passed")
 
 
+def log_records(data):
+    compact = data[:8] in (b'MINIVDB3', b'MINIVDB5')
+    cursor = 8
+    while cursor < len(data):
+        if compact and data[cursor] in (0x80, 0xa0):
+            length, _, key = struct.unpack_from('<HHq', data, cursor + 1)
+            op = 6 if data[cursor] == 0xa0 else 3
+            header, footer = 13, 2
+            assert struct.unpack_from('<H', data, cursor + header + length)[0] == header + length + footer
+        else:
+            marker = int(compact)
+            if compact:
+                assert data[cursor] == 0x40
+            length, op, _, key, _ = struct.unpack_from('<IIIqQ', data, cursor + marker)
+            header, footer = 28 + marker, 4 + marker
+            if compact:
+                assert data[cursor + header + length + 4] == 0x80
+            assert struct.unpack_from('<I', data, cursor + header + length)[0] == header + length + footer
+        yield length, op, key, cursor + header
+        cursor += length + header + footer
+    assert cursor == len(data)
+
+
 def packed_storage(binary, root):
     # 129 coordinates exercise the partial SIMD block. Include sign bits,
     # exponent escapes, and values in the same row that must remain raw.
@@ -366,11 +389,11 @@ def packed_storage(binary, root):
             assert binary32(json.loads(vector, parse_int=float)) == binary32(values[key]), key
             assert body == labels[key] and int(tag) == key % 2
 
-    for version in (1, 2, 3, 4):
+    for version in (1, 2, 3, 4, 5):
         folder = root / f'v{version}'
         folder.mkdir(parents=True)
         log = folder / 'minivectordb.log'
-        if version != 4:
+        if version != 5:
             log.write_bytes(f'MINIVDB{version}'.encode('ascii'))
         with Session(binary, folder) as db:
             db.ok(f'CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR({size}), body VARCHAR(8), tag BIGINT)')
@@ -400,25 +423,8 @@ def packed_storage(binary, root):
             db.quit()
         data = log.read_bytes()
         assert data[:8] == f'MINIVDB{version}'.encode('ascii')
-        records = {}
-        cursor = 8
-        while cursor < len(data):
-            if version == 3 and data[cursor] in (0x80, 0xa0):
-                length, _, key = struct.unpack_from('<HHq',data,cursor+1)
-                op = 6 if data[cursor] == 0xa0 else 3
-                header, footer = 13, 2
-            else:
-                if version == 3:
-                    assert data[cursor] == 0x40
-                marker = 1 if version == 3 else 0
-                length, op, _, key, _ = struct.unpack_from('<IIIqQ',data,cursor+marker)
-                header, footer = 28 + marker, 4 + marker
-                if version == 3:
-                    assert data[cursor + header + length + 4] == 0x80
-            if op in (3,6):
-                records[key] = (op, length, data[cursor + header:cursor + header + 2])
-            cursor += length + header + footer
-        assert cursor == len(data)
+        records = {key: (op, length, data[offset:offset + 2])
+                   for length, op, key, offset in log_records(data) if op in (3, 6)}
         assert set(records) == {1,2,3}
         if version == 1:
             assert all(op==3 for op,_,_ in records.values())
@@ -426,10 +432,10 @@ def packed_storage(binary, root):
             assert records[1][0]==6 and int.from_bytes(records[1][2],'little') & 0x8000
             assert records[2][0]==6 and not int.from_bytes(records[2][2],'little') & 0x8000
             assert records[3][0]==3
-    print('Lossless float32 storage: v1 through v4, indexed filters, rollback and crash recovery passed')
+    print('Lossless float32 storage: v1 through v5, indexed filters, rollback and crash recovery passed')
 
 
-def decimal_storage(binary, root):
+def decimal_storage(binary, root, version):
     dimension = 129
     vectors = {
         1: [(-1)**i * (13 + (i * 17) % 110) / 100 for i in range(dimension)],
@@ -444,6 +450,9 @@ def decimal_storage(binary, root):
         for key, value in vectors.items():
             assert db.query(f"SELECT id FROM t ORDER BY L2_DISTANCE(v,'{json.dumps(value)}') LIMIT 1") == [[str(key)]]
 
+    if version == 4:
+        root.mkdir(parents=True)
+        (root / 'minivectordb.log').write_bytes(b'MINIVDB4')
     with Session(binary, root) as db:
         db.ok(f'CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR({dimension}))')
         rows = ','.join(f"({key},'{json.dumps(v)}')" for key,v in vectors.items())
@@ -461,20 +470,59 @@ def decimal_storage(binary, root):
         check(db)
         db.quit()
     data = (root / 'minivectordb.log').read_bytes()
-    assert data.startswith(b'MINIVDB4')
-    cursor = 8
+    assert data.startswith(f'MINIVDB{version}'.encode('ascii'))
     widths = {}
-    while cursor < len(data):
-        length, op, _, key, _ = struct.unpack_from('<IIIqQ', data, cursor)
+    for _, op, key, offset in log_records(data):
         if op == 6:
-            prefix, descriptor = struct.unpack_from('<HB', data, cursor + 28)
+            prefix, descriptor = struct.unpack_from('<HB', data, offset)
             assert prefix & 0x4000 and not prefix & 0x8000
             width = descriptor & 3
             assert (prefix & 0x3fff) == 3 + width * dimension
             widths[key] = width
-        cursor += length + 32
-    assert cursor == len(data) and widths == {1: 1, 2: 2, 3: 3}, widths
+    assert widths == {1: 1, 2: 2, 3: 3}, widths
     print('Decimal vectors: three code widths, bit-exact rollback, partial SIMD block and indexed restart passed')
+
+
+def dyadic_storage(binary, root):
+    dimension = 129
+    vectors = {width: [1.0] + [(-1)**i * ((i * 13) % (1 << (width - 2)) | 1) / (1 << (width - 2))
+                               for i in range(1, dimension)] for width in (8, 10, 12, 16)}
+    vectors[0] = [-0.0] + vectors[12][1:]
+
+    def check(db):
+        for key, values in db.query('SELECT id,v FROM t ORDER BY id'):
+            observed = array('f', json.loads(values, parse_int=float))
+            assert observed.tobytes() == array('f', vectors[int(key)]).tobytes(), key
+        for key, vector in vectors.items():
+            sql = f"SELECT id FROM t ORDER BY L2_DISTANCE(v,'{json.dumps(vector)}') LIMIT 1"
+            assert db.query(sql) == [[str(key)]]
+
+    with Session(binary, root) as db:
+        db.ok(f'CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR({dimension}))')
+        rows = ','.join(f"({key},'{json.dumps(v)}')" for key, v in vectors.items())
+        db.ok('INSERT INTO t VALUES ' + rows, len(vectors))
+        db.ok('CREATE VECTOR INDEX i ON t(v)')
+        check(db)
+        db.ok('BEGIN')
+        db.ok(f"UPDATE t SET v='{json.dumps(vectors[16])}' WHERE id=8", 1)
+        db.ok('DELETE FROM t WHERE id=10', 1)
+        db.ok('ROLLBACK')
+        check(db)
+        db.kill()
+    with Session(binary, root) as db:
+        db.ok('MODE ann')
+        check(db)
+        db.quit()
+    data = (root / 'minivectordb.log').read_bytes()
+    widths = {}
+    for _, op, key, offset in log_records(data):
+        if op == 6:
+            prefix, width = struct.unpack_from('<HB', data, offset)
+            if prefix & 0xc000 == 0xc000:
+                assert prefix & 0x3fff == 4 + width * ((dimension + 7) // 8)
+                widths[key] = width
+    assert widths == {key: key for key in (8, 10, 12, 16)}, widths
+    print('Dyadic vectors: four widths, signed zero, partial block, rollback and indexed restart passed')
 
 
 def script_input(binary, root):
@@ -631,10 +679,10 @@ def shutdown_backpressure(binary, root):
     print("Full stdout pipe and disconnected reader both shut down and rolled back")
 
 
-def partial_log(binary, root):
+def partial_log(binary, root, version):
     source = root / "source"
     source.mkdir(parents=True)
-    (source / "minivectordb.log").write_bytes(b"MINIVDB3")
+    (source / "minivectordb.log").write_bytes(f"MINIVDB{version}".encode("ascii"))
     body = "x" * 33_000
     with Session(binary, source) as db:
         db.ok("CREATE TABLE wide (id BIGINT PRIMARY KEY, body VARCHAR(40000))")
@@ -653,7 +701,7 @@ def partial_log(binary, root):
         db.ok("COMMIT")
         db.quit()
     after = log.stat().st_size
-    # v3 uses a wide UPDATE, a compact INSERT and a wide COMMIT. Include
+    # This layout uses a wide UPDATE, a compact INSERT and a wide COMMIT. Include
     # torn length trailers at both insert and commit boundaries.
     insert = before + 34 + 8
     for number, cut in enumerate((before + 1, before + 28, insert - 1, insert + 1,
@@ -670,7 +718,7 @@ def partial_log(binary, root):
                 assert db.query("SELECT body FROM wide") == [[body]], cut
                 assert db.query("SELECT * FROM t ORDER BY id") == expected, cut
                 db.quit()
-    print("Nine log cut points, with two successive recoveries each: passed")
+    print(f"MINIVDB{version}: nine log cut points, with two successive recoveries each passed")
 
 
 def process_read_chars(pid):
@@ -1099,6 +1147,49 @@ def shortlist_bounds(binary, root):
     print('Quantized shortlist: rank ties, partial blocks, VARCHAR equality, rollback and restart passed')
 
 
+def centered_bounds(binary, root):
+    rng = random.Random(68532)
+    center = [128 * 4096 + j * 960 for j in range(128)]
+    values = {key: [x + rng.randrange(-85, 86) for x in center] for key in range(769)}
+    values[1] = [x - 2 for x in center]
+    values[4] = [x + 2 for x in center]
+    keys = list(values)
+    rng.shuffle(keys)
+
+    def text(vector):
+        return json.dumps([x / 4096 for x in vector])
+
+    def check(db):
+        cases = [('WHERE tag=1 AND id<767', [k for k in keys if k % 3 == 1 and k < 767], center),
+                 ('', keys, center), ('', keys, [x + 8192 for x in center])]
+        for where, allowed, query in cases:
+            order = sorted(allowed, key=lambda k: (sum((x-y)**2 for x,y in zip(values[k],query)), k))
+            sql = f"SELECT id FROM t {where} ORDER BY L2_DISTANCE(v,'{text(query)}') LIMIT 10"
+            assert db.query(sql) == [[str(k)] for k in order[:10]]
+
+    with Session(binary, root) as db:
+        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, tag BIGINT, v VECTOR(128))")
+        for start in range(0, len(keys), 80):
+            batch = keys[start:start+80]
+            rows = ",".join(f"({k},{k % 3},'{text(values[k])}')" for k in batch)
+            db.ok("INSERT INTO t VALUES " + rows, len(batch))
+        db.ok("CREATE VECTOR INDEX i ON t(v)")
+        check(db)
+        db.ok("BEGIN")
+        saved = values[1]
+        values[1] = [x + 8192 for x in center]
+        db.ok(f"UPDATE t SET v='{text(values[1])}' WHERE id=1", 1)
+        check(db)
+        db.ok("ROLLBACK")
+        values[1] = saved
+        check(db)
+        db.quit()
+    with Session(binary, root) as db:
+        check(db)
+        db.quit()
+    print("Centered TopK: integer ranks, ties, query outside bounds, rollback and restart passed")
+
+
 def many_filter_groups(binary, root):
     count, groups = 1426, 713
 
@@ -1200,18 +1291,22 @@ def main():
         vector_syntax(binary, root / "vector-syntax")
         functional(binary, root / "sql")
         packed_storage(binary, root / "packed-storage")
-        decimal_storage(binary, root / "decimal-storage")
+        decimal_storage(binary, root / "decimal-v4", 4)
+        decimal_storage(binary, root / "decimal-v5", 5)
+        dyadic_storage(binary, root / "dyadic-storage")
         script_input(binary, root / "framing")
         paged_mutations(binary, root / "directory")
         atomicity(binary, root / "atomic")
         shutdown_backpressure(binary, root / "backpressure")
-        partial_log(binary, root / "partial")
+        partial_log(binary, root / "partial-v3", 3)
+        partial_log(binary, root / "partial-v5", 5)
         indexed_ties(binary, root / "index")
         conservative_bounds(binary, root / "bounds")
         packed_bounds(binary, root / "packed-bounds")
         quantized_ties(binary, root / "quantized-ties")
         grouped_distance_bounds(binary, root / "grouped-bounds")
         shortlist_bounds(binary, root / "shortlist")
+        centered_bounds(binary, root / "centered")
         many_filter_groups(binary, root / "filter-groups")
         bounded_memory(binary, root / "large")
         indexed_memory(binary, root / "index-memory")

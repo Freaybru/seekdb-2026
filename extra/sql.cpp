@@ -25,33 +25,65 @@ bool space(char ch) {
 }
 bool digit(char ch) { return ch >= '0' && ch <= '9'; }
 
+size_t digit_prefix(uint64_t bytes) {
+  // Earlier digits borrow or carry nothing into the first nondigit byte.
+  const auto nondigits = ((bytes + 0x4646464646464646ull) | (bytes - 0x3030303030303030ull)) &
+                         0x8080808080808080ull;
+  return std::countr_zero(nondigits) / 8;
+}
+
+uint64_t decimal_units(uint64_t bytes, size_t digits) {
+  uint64_t units = bytes & 0x0f0f0f0f0f0f0f0full & (~uint64_t{0} >> (64 - 8 * digits));
+  units = (units * 10 + (units >> 8)) & 0x00ff00ff00ff00ffull;
+  units = (units * 100 + (units >> 16)) & 0x0000ffff0000ffffull;
+  return (units * 10000 + (units >> 32)) & 0xffffffffull;
+}
+
 const char* fixed_decimal(const char* first, const char* start, const char* last, float& output) {
   if constexpr (std::endian::native != std::endian::little) return nullptr;
   if (last - start <= 10 || !digit(start[0]) || start[1] != '.') return nullptr;
   uint64_t bytes;
   std::memcpy(&bytes, start + 2, sizeof(bytes));
-  // Earlier digits borrow or carry nothing into the first nondigit byte.
-  const auto nondigits = ((bytes + 0x4646464646464646ull) | (bytes - 0x3030303030303030ull)) &
-                         0x8080808080808080ull;
-  const size_t digits = std::countr_zero(nondigits) / 8;
+  const size_t digits = digit_prefix(bytes);
   if (!digits) return nullptr;
   const char* end = start + 2 + digits;
-  uint64_t units = bytes & 0x0f0f0f0f0f0f0f0full & (~uint64_t{0} >> (64 - 8 * digits));
-  units = (units * 10 + (units >> 8)) & 0x00ff00ff00ff00ffull;
-  units = (units * 100 + (units >> 16)) & 0x0000ffff0000ffffull;
-  units = (units * 10000 + (units >> 32)) & 0xffffffffull;
-  units += static_cast<unsigned>(start[0] - '0') * 100000000ull;
+  uint64_t units = decimal_units(bytes, digits) +
+      static_cast<unsigned>(start[0] - '0') * 100000000ull;
   double step = 1e-8;
+  bool long_decimal = false;
   if (digits == 8 && digit(*end)) {
-    units = units * 10 + static_cast<unsigned>(*end - '0');
-    ++end;
-    step = 1e-9;
+    if (end + 1 != last && !digit(end[1])) {
+      units = units * 10 + static_cast<unsigned>(*end++ - '0');
+      step = 1e-9;
+    } else {
+      if (last - end < 8) return nullptr;
+      std::memcpy(&bytes, end, sizeof(bytes));
+      const size_t tail = digit_prefix(bytes);
+      units = units * 100000000ull + decimal_units(bytes, tail);
+      end += tail;
+      step = 1e-16;
+      if (tail == 8 && end != last && digit(*end)) {
+        units = units * 10 + static_cast<unsigned>(*end++ - '0');
+        step = 1e-17;
+        if (end != last && digit(*end)) {
+          units = units * 10 + static_cast<unsigned>(*end++ - '0');
+          step = 1e-18;
+        }
+      }
+      long_decimal = true;
+    }
   }
   if (end == last || (*end != ',' && *end != ']' && !space(*end))) return nullptr;
-  // These decimals are separated from every binary32 midpoint by more
-  // than binary64 conversion error (up to nine powers of five in the
-  // denominator). Dyadic values here have at most nine fractional bits.
-  const float value = static_cast<float>(static_cast<double>(units) * step);
+  const double approximate = static_cast<double>(units) * step;
+  if (long_decimal) {
+    // These values are normal in binary32. A rounding midpoint has exactly
+    // bit 28 set among the 29 binary64 fraction bits discarded by binary32.
+    // Eight binary64 steps cover integer conversion, the scale and multiplication.
+    constexpr uint64_t midpoint = uint64_t{1} << 28;
+    const auto fraction = std::bit_cast<uint64_t>(approximate) & (2 * midpoint - 1);
+    if (fraction >= midpoint - 8 && fraction <= midpoint + 8) return nullptr;
+  }
+  const float value = static_cast<float>(approximate);
   output = *first == '-' ? -value : value;
   return end;
 }

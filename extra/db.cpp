@@ -214,12 +214,13 @@ struct BoundCache {
   std::vector<BoundRow> rows;
   std::vector<int32_t> norms;
   std::vector<int8_t> codes;
+  std::vector<double> origin;
   bool groups_attempted = false;
   std::unique_ptr<BoundGroups> groups;
 
   size_t bytes() const {
     return rows.capacity() * sizeof(BoundRow) + norms.capacity() * sizeof(int32_t) +
-           codes.capacity() + (groups ? groups->bytes() : 0);
+           codes.capacity() + origin.capacity() * sizeof(double) + (groups ? groups->bytes() : 0);
   }
 };
 
@@ -287,10 +288,39 @@ std::string_view payload(Log& log, RowRef row) {
 constexpr uint32_t max_packed_dimensions = 4096;
 constexpr uint16_t short_vector = 0x8000;
 constexpr uint16_t decimal_vector = 0x4000;
+constexpr uint16_t dyadic_vector = short_vector | decimal_vector;
 constexpr size_t packed_block = 8;
 constexpr size_t packed_block_bytes = 28;
 constexpr std::array<double, 3> decimal_scales{100.0, 10000.0, 1000000.0};
 constexpr size_t decimal_header = sizeof(uint16_t) + sizeof(uint8_t);
+constexpr size_t dyadic_header = sizeof(uint16_t) + 2 * sizeof(uint8_t);
+
+struct DyadicGrid {
+  unsigned width;
+  float step;
+};
+
+float power_of_two(int exponent) {
+  return std::bit_cast<float>(static_cast<uint32_t>(exponent + 127) << 23);
+}
+
+DyadicGrid read_dyadic_grid(Reader& reader) {
+  const unsigned width = reader.read<uint8_t>();
+  const int exponent = reader.read<int8_t>();
+  if ((width != 8 && width != 10 && width != 12 && width != 16) ||
+      exponent < -100 || exponent > 100) throw std::runtime_error("invalid dyadic vector encoding");
+  return {width, power_of_two(exponent)};
+}
+
+int32_t dyadic_code(std::string_view bytes, unsigned width, size_t lane) {
+  uint64_t upper = 0;
+  std::memcpy(&upper, bytes.data() + packed_block, width - packed_block);
+  const unsigned high_bits = width - 8;
+  const auto high = static_cast<uint32_t>(upper >> (high_bits * lane)) & ((1u << high_bits) - 1);
+  const auto stored = static_cast<uint8_t>(bytes[lane]) | (high << 8);
+  const uint32_t sign = 1u << (width - 1);
+  return static_cast<int32_t>(stored ^ sign) - static_cast<int32_t>(sign);
+}
 
 struct DecimalGrid {
   unsigned width;
@@ -323,6 +353,47 @@ bool decimal_code(float input, double scale, int32_t& code) {
 }
 
 #if defined(__x86_64__)
+template <unsigned Width>
+__attribute__((target("avx2")))
+bool pack_dyadic_blocks(std::string_view vector, float scale, float step, char* output, size_t& i) {
+  const auto factor = _mm256_set1_ps(scale);
+  const auto unit = _mm256_set1_ps(step);
+  const auto overflow = _mm256_set1_epi32(1 << (Width - 1));
+  const auto low_mask = _mm256_set1_epi32(255);
+  constexpr unsigned bits = Width - 8;
+  const auto shifts = _mm256_setr_epi32(0,bits,2*bits,3*bits,4*bits,5*bits,6*bits,7*bits);
+  const auto high_mask = _mm256_set1_epi32((1 << bits) - 1);
+  for (; i + packed_block * sizeof(float) <= vector.size(); i += packed_block * sizeof(float)) {
+    __m256 original;
+    std::memcpy(&original, vector.data()+i, sizeof(original));
+    const auto code = _mm256_cvttps_epi32(_mm256_mul_ps(original, factor));
+    const auto magnitude = _mm256_abs_epi32(code);
+    const auto inside = _mm256_cmpgt_epi32(overflow, magnitude);
+    const auto restored = _mm256_mul_ps(_mm256_cvtepi32_ps(code), unit);
+    const auto same = _mm256_cmpeq_epi32(_mm256_castps_si256(original), _mm256_castps_si256(restored));
+    if (static_cast<unsigned>(_mm256_movemask_epi8(_mm256_and_si256(inside,same))) != UINT32_MAX) return false;
+    const auto low = _mm256_and_si256(code, low_mask);
+    const auto halves = _mm_packus_epi32(_mm256_castsi256_si128(low), _mm256_extracti128_si256(low, 1));
+    const uint64_t bytes = static_cast<uint64_t>(_mm_cvtsi128_si64(_mm_packus_epi16(halves, halves)));
+    auto* block = output + i / (packed_block * sizeof(float)) * Width;
+    std::memcpy(block, &bytes, packed_block);
+    if constexpr (Width == 16) {
+      const auto high = _mm256_and_si256(_mm256_srli_epi32(code, 8), high_mask);
+      const auto words = _mm_packus_epi32(_mm256_castsi256_si128(high), _mm256_extracti128_si256(high, 1));
+      const uint64_t upper = static_cast<uint64_t>(_mm_cvtsi128_si64(_mm_packus_epi16(words,words)));
+      std::memcpy(block+packed_block, &upper, packed_block);
+    } else if constexpr (Width != 8) {
+      const auto fields = _mm256_sllv_epi32(_mm256_and_si256(_mm256_srli_epi32(code, 8), high_mask), shifts);
+      auto all = _mm_or_si128(_mm256_castsi256_si128(fields), _mm256_extracti128_si256(fields, 1));
+      all = _mm_or_si128(all, _mm_srli_si128(all, 8));
+      all = _mm_or_si128(all, _mm_srli_si128(all, 4));
+      const uint32_t upper = static_cast<uint32_t>(_mm_cvtsi128_si32(all));
+      std::memcpy(block+packed_block, &upper, Width-packed_block);
+    }
+  }
+  return true;
+}
+
 __attribute__((target("avx2")))
 bool decimal_blocks(std::string_view vector, std::span<int32_t> codes, double scale,
                     int32_t& largest, size_t& i) {
@@ -413,6 +484,52 @@ size_t pack_blocks(std::string_view vector, unsigned highest, std::string& packe
 }
 #endif
 
+template <unsigned Width>
+bool pack_dyadic(std::string_view vector, int highest, size_t previous_size, std::string& packed) {
+  const size_t blocks = (vector.size() / sizeof(float) + packed_block - 1) / packed_block;
+  const size_t size = dyadic_header + blocks * Width;
+  const int exponent = highest - Width + 2;
+  if (size >= previous_size || exponent < -100 || exponent > 100) return false;
+  const float step = power_of_two(exponent);
+  const float scale = power_of_two(-exponent);
+  packed.resize(size);
+  char* output = packed.data()+dyadic_header;
+  size_t i = 0;
+#if defined(__x86_64__)
+  if (__builtin_cpu_supports("avx2") && !pack_dyadic_blocks<Width>(vector, scale, step, output, i)) return false;
+#endif
+  constexpr auto limit = 1 << (Width-1);
+  constexpr auto high_mask = (1u << (Width-8))-1;
+  for (; i < vector.size();) {
+    auto* block = output + i / (packed_block * sizeof(float)) * Width;
+    std::fill_n(block, Width, '\0');
+    uint64_t high = 0;
+    for (size_t lane = 0; lane < packed_block && i < vector.size(); ++lane, i+=sizeof(float)) {
+      const float original = load<float>(vector.substr(i));
+      const float scaled = original * scale;
+      if (!(std::abs(scaled) < limit)) return false;
+      const int32_t code = static_cast<int32_t>(scaled);
+      if (std::bit_cast<uint32_t>(code*step) != std::bit_cast<uint32_t>(original)) return false;
+      block[lane] = static_cast<char>(code);
+      high |= uint64_t((static_cast<uint32_t>(code) >> 8) & high_mask) << ((Width-8)*lane);
+    }
+    std::memcpy(block + packed_block, &high, Width-packed_block);
+  }
+  const auto header = static_cast<uint16_t>(size | dyadic_vector);
+  std::memcpy(packed.data(), &header, sizeof(header));
+  packed[2] = static_cast<char>(Width);
+  packed[3] = static_cast<char>(exponent);
+  return true;
+}
+
+bool on_grid(uint32_t bits, int exponent) {
+  const uint32_t magnitude = bits & 0x7fffffffu;
+  if (magnitude == 0) return bits == 0;
+  const int binary_exponent = static_cast<int>(magnitude >> 23);
+  const uint32_t digits = (magnitude & 0x7fffffu) | (binary_exponent ? 0x800000u : 0u);
+  return std::max(1, binary_exponent) - 150 + std::countr_zero(digits) >= exponent;
+}
+
 // The first word records the prefix size and encoding. Scalar columns retain
 // their original byte layout. A vector can always be stored as raw float32.
 bool pack_decimal(std::string_view vector, size_t previous_size, std::string& packed) {
@@ -451,21 +568,38 @@ bool pack_decimal(std::string_view vector, size_t previous_size, std::string& pa
   return false;
 }
 
-std::string_view pack_row(std::string_view row, uint32_t vector_bytes, std::string& packed, bool decimal) {
+std::string_view pack_row(std::string_view row, uint32_t vector_bytes, std::string& packed,
+                          bool decimal, bool dyadic) {
   const size_t dimension = vector_bytes / sizeof(float);
   if (dimension < 16 || dimension > max_packed_dimensions) return {};
   uint32_t low_bits = 0;
-  unsigned highest = 0;
+  uint32_t maximum = 0;
   for (size_t i = 0; i < dimension; ++i) {
     uint32_t bits;
     std::memcpy(&bits, row.data() + i * sizeof(bits), sizeof(bits));
     low_bits |= bits;
-    highest = std::max(highest, (bits >> 24) & 127u);
+    maximum = std::max(maximum, bits & 0x7fffffffu);
   }
 
   const bool short_form = (low_bits & 0xffffu) == 0;
   const size_t blocks = (dimension + packed_block - 1) / packed_block;
   const size_t previous_size = 3 + blocks * packed_block_bytes;
+  if (dyadic) {
+    const auto vector = row.substr(0, vector_bytes);
+    const int exponent = static_cast<int>(maximum >> 23) - 127;
+    const size_t packed_size = short_form ? 2 + 2 * dimension : std::min<size_t>(previous_size, vector_bytes);
+    const int widest = short_form ? 12 : 16;
+    // Narrower grids have coarser power-of-two steps. A first coordinate
+    // outside the widest grid rules them all out.
+    if (on_grid(load<uint32_t>(vector), exponent - widest + 2) &&
+        (pack_dyadic<8>(vector, exponent, packed_size, packed) ||
+         pack_dyadic<10>(vector, exponent, packed_size, packed) ||
+         pack_dyadic<12>(vector, exponent, packed_size, packed) ||
+         pack_dyadic<16>(vector, exponent, packed_size, packed))) {
+      packed.append(row.substr(vector_bytes));
+      return packed;
+    }
+  }
   if (decimal && !short_form &&
       pack_decimal(row.substr(0, vector_bytes), std::min<size_t>(previous_size, vector_bytes), packed)) {
     packed.append(row.substr(vector_bytes));
@@ -485,6 +619,7 @@ std::string_view pack_row(std::string_view row, uint32_t vector_bytes, std::stri
       std::memcpy(output + offset / 2, row.data() + offset + sizeof(uint16_t), sizeof(uint16_t));
     }
   } else {
+    const unsigned highest = maximum >> 24;
     packed.resize(3 + blocks * packed_block_bytes, '\0');
     packed[2] = static_cast<char>(highest);
     size_t i = 0;
@@ -528,8 +663,9 @@ RowRef row_location(Log& log, const Table& table, const Frame& frame) {
   }
   const auto header = load<uint16_t>(log.read(frame.payload_offset(), sizeof(uint16_t)));
   const auto size = packed_prefix(header);
-  if ((header & decimal_vector) &&
-      (!log.supports_decimal_vectors() || (header & short_vector) || size < decimal_header)) {
+  if ((header & dyadic_vector) == dyadic_vector) {
+    if (!log.supports_dyadic_vectors() || size < dyadic_header) throw std::runtime_error("invalid dyadic vector prefix");
+  } else if ((header & decimal_vector) && (!log.supports_decimal_vectors() || size < decimal_header)) {
     throw std::runtime_error("invalid decimal vector encoding");
   }
   if (size < sizeof(uint16_t) || size > frame.length || size >= table.vector_bytes) {
@@ -539,6 +675,36 @@ RowRef row_location(Log& log, const Table& table, const Frame& frame) {
 }
 
 #if defined(__x86_64__)
+template <unsigned Width>
+__attribute__((target("avx2")))
+size_t unpack_dyadic_blocks(std::string_view bytes, float step, std::span<char> output) {
+  const auto unit = _mm256_set1_ps(step);
+  constexpr unsigned bits = Width-8;
+  const auto shifts = _mm256_setr_epi32(0,bits,2*bits,3*bits,4*bits,5*bits,6*bits,7*bits);
+  const auto high_mask = _mm256_set1_epi32((1 << bits)-1);
+  size_t i = 0;
+  for (; i + packed_block * sizeof(float) <= output.size(); i += packed_block * sizeof(float)) {
+    const auto* block = bytes.data() + i / (packed_block * sizeof(float)) * Width;
+    int64_t low;
+    std::memcpy(&low, block, sizeof(low));
+    auto codes = _mm256_cvtepu8_epi32(_mm_cvtsi64_si128(low));
+    if constexpr (Width == 16) {
+      int64_t upper;
+      std::memcpy(&upper, block + packed_block, sizeof(upper));
+      codes = _mm256_or_si256(codes, _mm256_slli_epi32(_mm256_cvtepu8_epi32(_mm_cvtsi64_si128(upper)), 8));
+    } else if constexpr (Width != 8) {
+      uint32_t upper = 0;
+      std::memcpy(&upper, block + packed_block, Width-packed_block);
+      const auto fields = _mm256_srlv_epi32(_mm256_set1_epi32(static_cast<int32_t>(upper)), shifts);
+      codes = _mm256_or_si256(codes, _mm256_slli_epi32(_mm256_and_si256(fields, high_mask), 8));
+    }
+    const auto sign_extended = _mm256_srai_epi32(_mm256_slli_epi32(codes,32-Width), 32-Width);
+    const auto values = _mm256_mul_ps(_mm256_cvtepi32_ps(sign_extended), unit);
+    std::memcpy(output.data()+i, &values, sizeof(values));
+  }
+  return i / sizeof(float);
+}
+
 template <unsigned Width>
 __attribute__((target("avx2")))
 size_t unpack_decimal_blocks(std::string_view bytes, double step, std::span<char> output) {
@@ -637,7 +803,24 @@ void unpack_vector(std::string_view bytes, std::span<char> output) {
   Reader reader(bytes);
   const auto header = reader.read<uint16_t>();
   if (packed_prefix(header) != bytes.size()) throw std::runtime_error("invalid packed vector prefix");
-  if (header & decimal_vector) {
+  if ((header & dyadic_vector) == dyadic_vector) {
+    const auto grid = read_dyadic_grid(reader);
+    const auto data = reader.take(((dimension + packed_block-1) / packed_block) * grid.width);
+    size_t i = 0;
+#if defined(__x86_64__)
+    if (__builtin_cpu_supports("avx2")) {
+      if (grid.width == 8) i = unpack_dyadic_blocks<8>(data, grid.step, output);
+      else if (grid.width == 10) i = unpack_dyadic_blocks<10>(data, grid.step, output);
+      else if (grid.width == 12) i = unpack_dyadic_blocks<12>(data, grid.step, output);
+      else i = unpack_dyadic_blocks<16>(data, grid.step, output);
+    }
+#endif
+    for (; i < dimension; ++i) {
+      const auto block = data.substr(i / packed_block * grid.width, grid.width);
+      const float value = dyadic_code(block, grid.width, i % packed_block) * grid.step;
+      std::memcpy(output.data()+i*sizeof(float), &value, sizeof(value));
+    }
+  } else if (header & decimal_vector) {
     const auto grid = read_decimal_grid(reader);
     const auto data = reader.take(dimension * grid.width);
     size_t i = 0;
@@ -709,6 +892,10 @@ float first_coordinate(Log& log, const Table& table, RowRef row) {
   const auto bytes = log.read(offset, row.packed_bytes);
   Reader reader(bytes);
   const auto header = reader.read<uint16_t>();
+  if ((header & dyadic_vector) == dyadic_vector) {
+    const auto grid = read_dyadic_grid(reader);
+    return dyadic_code(reader.take(grid.width), grid.width, 0) * grid.step;
+  }
   if (header & decimal_vector) {
     const auto grid = read_decimal_grid(reader);
     return static_cast<float>(signed_decimal_code(reader.take(grid.width)) * grid.step);
@@ -782,7 +969,8 @@ void decode(Log& log, const Table& table, int64_t key, RowRef row,
 Frame append_row(Log& log, const Table& table, int64_t key, uint64_t previous,
                  std::string_view bytes, std::string& packed) {
   if (log.supports_packed_rows()) {
-    const auto encoded = pack_row(bytes, table.vector_bytes, packed, log.supports_decimal_vectors());
+    const auto encoded = pack_row(bytes, table.vector_bytes, packed, log.supports_decimal_vectors(),
+                                  log.supports_dyadic_vectors());
     if (!encoded.empty()) return log.append(Op::packed_put, table.id, key, previous, encoded);
   }
   return log.append(Op::put, table.id, key, previous, bytes);
@@ -1200,13 +1388,52 @@ double largest_component(std::string_view bytes) {
   return largest;
 }
 
+struct CoordinateRange {
+  std::array<float, geometric_stride> low;
+  std::array<float, geometric_stride> high;
+
+  CoordinateRange() {
+    low.fill(std::numeric_limits<float>::infinity());
+    high.fill(-std::numeric_limits<float>::infinity());
+  }
+
+  __attribute__((target("avx2")))
+  bool include(std::string_view bytes) {
+    const auto finite = _mm256_set1_ps(std::numeric_limits<float>::max());
+    const auto sign = _mm256_set1_ps(-0.0f);
+    for (size_t i = 0; i < low.size(); i += 8) {
+      __m256 values;
+      std::memcpy(&values, bytes.data() + i * sizeof(float), sizeof(values));
+      if (_mm256_movemask_ps(_mm256_cmp_ps(_mm256_andnot_ps(sign, values), finite, _CMP_LE_OQ)) != 255) {
+        return false;
+      }
+      _mm256_storeu_ps(low.data() + i, _mm256_min_ps(_mm256_loadu_ps(low.data() + i), values));
+      _mm256_storeu_ps(high.data() + i, _mm256_max_ps(_mm256_loadu_ps(high.data() + i), values));
+    }
+    return true;
+  }
+
+  std::pair<double, double> extent(std::array<double, geometric_stride>& origin) const {
+    double centered = 0;
+    double uncentered = 0;
+    for (size_t i = 0; i < low.size(); ++i) {
+      origin[i] = (double{low[i]} + high[i]) * 0.5;
+      uncentered = std::max({uncentered, std::abs(double{low[i]}), std::abs(double{high[i]})});
+      centered = std::max({centered, origin[i] - low[i], high[i] - origin[i]});
+    }
+    return {uncentered, centered};
+  }
+};
+
 struct BoundNorm {
   int32_t squared = 0;
   double error_squared = 0;
 };
 
+template <bool Centered = false>
 __attribute__((target("avx2")))
-BoundNorm quantize_row(std::string_view bytes, double inverse_step, int8_t* output) {
+BoundNorm quantize_row(std::string_view bytes, double inverse_step, int8_t* output,
+                      const double* origin) {
   const auto scale = _mm256_set1_pd(inverse_step);
   const auto half = _mm256_set1_pd(0.5);
   const auto sign = _mm256_set1_pd(-0.0);
@@ -1219,7 +1446,12 @@ BoundNorm quantize_row(std::string_view bytes, double inverse_step, int8_t* outp
     __m128 values;
     std::memcpy(&values, bytes.data(), sizeof(values));
     bytes.remove_prefix(sizeof(values));
-    const auto scaled = _mm256_mul_pd(_mm256_cvtps_pd(values), scale);
+    auto components = _mm256_cvtps_pd(values);
+    if constexpr (Centered) {
+      components = _mm256_sub_pd(components, _mm256_loadu_pd(origin));
+      origin += 4;
+    }
+    const auto scaled = _mm256_mul_pd(components, scale);
     const auto round = _mm256_or_pd(half, _mm256_and_pd(sign, scaled));
     const auto codes = _mm256_cvttpd_epi32(_mm256_add_pd(scaled, round));
     norm = _mm_add_epi32(norm, _mm_mullo_epi32(codes, _mm_add_epi32(codes, bias)));
@@ -1236,7 +1468,9 @@ BoundNorm quantize_row(std::string_view bytes, double inverse_step, int8_t* outp
   BoundNorm result{std::accumulate(norms.begin(), norms.end(), 0),
                    std::accumulate(errors.begin(), errors.end(), 0.0)};
   for (size_t i = 0; !bytes.empty(); ++i) {
-    const double scaled = load<float>(bytes) * inverse_step;
+    double component = load<float>(bytes);
+    if constexpr (Centered) component -= *origin++;
+    const double scaled = component * inverse_step;
     bytes.remove_prefix(sizeof(float));
     const int code = quantize(scaled);
     output[offset + i] = static_cast<int8_t>(code);
@@ -1255,7 +1489,7 @@ bool make_bound_query(const BoundCache& cache, const std::vector<float>& query,
   const int step = full_resolution ? 1 : 2;
   const double scale = full_resolution ? cache.inverse_step : cache.inverse_step * 0.5;
   for (size_t i = 0; i < query.size(); ++i) {
-    const double scaled = query[i] * scale;
+    const double scaled = (cache.origin.empty() ? double{query[i]} : query[i] - cache.origin[i]) * scale;
     if (std::abs(scaled) > bias + 0.5) return false;
     const int code = std::clamp(quantize(scaled), -bias, bias);
     packed.codes[i] = static_cast<uint8_t>(code + bias);
@@ -1271,7 +1505,8 @@ bool make_bound_query(const BoundCache& cache, const std::vector<float>& query,
 int32_t bound_cutoff(double worst, double margin, const BoundCache& cache, const BoundQuery& query) {
   // Triangle inequality in code units. Use the largest measured row error
   // and this query's error. Scaling stays within +/-128 and there are at most
-  // 4096 coordinates, so 1e-8 covers double rounding in both residual norms.
+  // 4096 coordinates, so 1e-8 covers double rounding in the translation,
+  // scaling and both residual norms.
   // Round up and retain equality for exact ties.
   const double radius = std::sqrt(worst) * (1.0 + margin) * cache.inverse_step +
                         cache.max_error + query.error + 1e-8;
@@ -1701,8 +1936,23 @@ void Database::prepare_bounds(Table& current, std::optional<size_t> equality_col
     return read_vector(log_, current, row, buffer);
   };
   double largest = 0;
-  for (const auto& entry : current.rows) {
-    largest = std::max(largest, largest_component(vector(entry.second)));
+  std::array<double, geometric_stride> origin;
+  bool center = false;
+  if (dimension == geometric_stride && budget - slots * (stride + sizeof(BoundRow) + sizeof(int32_t)) >=
+                                         geometric_stride * sizeof(double)) {
+    CoordinateRange extent;
+    for (const auto& entry : current.rows) {
+      if (!extent.include(vector(entry.second))) return;
+    }
+    const auto [uncentered, centered] = extent.extent(origin);
+    // A common translation preserves L2. Use it when it reduces the
+    // shared quantization step enough to matter.
+    center = centered > 0 && centered < uncentered * 0.875;
+    largest = center ? centered : uncentered;
+  } else {
+    for (const auto& entry : current.rows) {
+      largest = std::max(largest, largest_component(vector(entry.second)));
+    }
   }
   if (largest == 0 || !std::isfinite(largest)) return;
 
@@ -1712,6 +1962,7 @@ void Database::prepare_bounds(Table& current, std::optional<size_t> equality_col
     cache->rows.reserve(count);
     cache->norms.resize(slots);
     cache->codes.resize(slots * stride);
+    if (center) cache->origin.assign(origin.begin(), origin.end());
   } catch (const std::bad_alloc&) {
     return;
   }
@@ -1724,7 +1975,8 @@ void Database::prepare_bounds(Table& current, std::optional<size_t> equality_col
     const auto bytes = vector(row.location());
     const size_t slot = cache->rows.size();
     auto* out = cache->codes.data() + (slot & ~(code_block - 1)) * stride + (slot % code_block) * code_word;
-    const auto norm = quantize_row(bytes, cache->inverse_step, out);
+    const auto norm = cache->origin.empty() ? quantize_row(bytes, cache->inverse_step, out, nullptr)
+        : quantize_row<true>(bytes, cache->inverse_step, out, cache->origin.data());
     cache->norms[slot] = norm.squared;
     cache->rows.push_back(row);
     max_error_squared = std::max(max_error_squared, norm.error_squared);
