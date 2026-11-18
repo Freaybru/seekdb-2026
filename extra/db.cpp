@@ -7,6 +7,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <new>
 #include <numeric>
 #include <type_traits>
@@ -27,8 +28,10 @@ constexpr size_t index_budget = 4 * 1024 * 1024;
 constexpr size_t bound_budget = 2 * 1024 * 1024;
 constexpr size_t code_block = 8;
 constexpr size_t code_word = 4;
+constexpr size_t code_alignment = code_block * code_word;
 constexpr size_t geometric_stride = 128;
 constexpr size_t geometric_buckets = 32;
+constexpr int32_t outlier_norm = std::numeric_limits<int32_t>::min();
 constexpr uint32_t wide_row = 8 * 1024;
 
 struct RowRef {
@@ -109,6 +112,16 @@ class Rows {
     auto entry = lower_bound(key);
     if (entry != end() && entry->first == key) ++entry;
     return entry;
+  }
+  bool range_at_least(const_iterator first, const_iterator last, size_t count) const {
+    while (first.page_ != last.page_) {
+      const size_t available = first.page_->second.size() - first.position_;
+      if (available >= count) return true;
+      count -= available;
+      ++first.page_;
+      first.position_ = 0;
+    }
+    return last.position_ - first.position_ >= count;
   }
   bool contains(int64_t key) const {
     const auto entry = lower_bound(key);
@@ -214,9 +227,20 @@ struct BoundCache {
   std::vector<BoundRow> rows;
   std::vector<int32_t> norms;
   std::vector<int8_t> codes;
+  size_t code_offset = 0;
   std::vector<double> origin;
+  bool has_outliers = false;
   bool groups_attempted = false;
   std::unique_ptr<BoundGroups> groups;
+
+  void allocate_codes(size_t size) {
+    codes.resize(size + code_alignment - 1);
+    const auto address = reinterpret_cast<uintptr_t>(codes.data());
+    code_offset = (code_alignment - address % code_alignment) % code_alignment;
+  }
+
+  const int8_t* code_bytes() const { return codes.data() + code_offset; }
+  int8_t* code_bytes() { return codes.data() + code_offset; }
 
   size_t bytes() const {
     return rows.capacity() * sizeof(BoundRow) + norms.capacity() * sizeof(int32_t) +
@@ -1258,7 +1282,7 @@ void group_bound_cache(Log& log, const Table& table, BoundCache& cache, size_t c
   auto groups = group_rows(log, table, column, budget, destinations);
   if (!groups) return;
   const auto code_at = [&](size_t slot) {
-    return cache.codes.data() + (slot & ~(code_block - 1)) * cache.stride + (slot % code_block) * code_word;
+    return cache.code_bytes() + (slot & ~(code_block - 1)) * cache.stride + (slot % code_block) * code_word;
   };
   // Move existing quantized rows along permutation cycles. Only actual rows
   // move, so each dimension's zero padding remains valid.
@@ -1285,7 +1309,7 @@ using CodePoint = std::array<int8_t, geometric_stride>;
 
 CodePoint code_point(const BoundCache& cache, size_t slot) {
   CodePoint point;
-  const auto* source = cache.codes.data() + (slot & ~(code_block - 1)) * cache.stride + (slot % code_block) * code_word;
+  const auto* source = cache.code_bytes() + (slot & ~(code_block - 1)) * cache.stride + (slot % code_block) * code_word;
   for (size_t i = 0; i < point.size(); i += code_word) {
     std::memcpy(point.data() + i, source + i * code_block, code_word);
   }
@@ -1318,6 +1342,16 @@ void prepare_bucket_geometry(BoundCache& cache) {
   if (between <= 3 * within) return;
 
   for (auto& bucket : groups.buckets) {
+    if (cache.has_outliers) {
+      const auto first = cache.norms.begin() + bucket.offset;
+      const auto last = first + bucket.count;
+      if (std::find(first, last, outlier_norm) != last) {
+        // An outlier is searched at its original precision, so this bucket
+        // needs a zero geometric lower bound.
+        bucket.radius = std::numeric_limits<int32_t>::max();
+        continue;
+      }
+    }
     const auto center = code_point(cache, bucket.offset);
     int32_t farthest = 0;
     for (size_t slot = bucket.offset + 1; slot < bucket.offset + bucket.count; ++slot) {
@@ -1413,15 +1447,30 @@ struct CoordinateRange {
     return true;
   }
 
-  std::pair<double, double> extent(std::array<double, geometric_stride>& origin) const {
-    double centered = 0;
-    double uncentered = 0;
+  __attribute__((target("avx2")))
+  bool contains(std::string_view bytes) const {
+    for (size_t i = 0; i < low.size(); i += 8) {
+      __m256 values;
+      std::memcpy(&values, bytes.data() + i * sizeof(float), sizeof(values));
+      const auto below = _mm256_cmp_ps(values, _mm256_loadu_ps(low.data() + i), _CMP_LT_OQ);
+      const auto above = _mm256_cmp_ps(values, _mm256_loadu_ps(high.data() + i), _CMP_GT_OQ);
+      if (_mm256_movemask_ps(_mm256_or_ps(below, above))) return false;
+    }
+    return true;
+  }
+
+  double scale_extent(std::array<double, geometric_stride>& origin, bool& centered) const {
+    double radius = 0;
+    double magnitude = 0;
     for (size_t i = 0; i < low.size(); ++i) {
       origin[i] = (double{low[i]} + high[i]) * 0.5;
-      uncentered = std::max({uncentered, std::abs(double{low[i]}), std::abs(double{high[i]})});
-      centered = std::max({centered, origin[i] - low[i], high[i] - origin[i]});
+      magnitude = std::max({magnitude, std::abs(double{low[i]}), std::abs(double{high[i]})});
+      radius = std::max({radius, origin[i] - low[i], high[i] - origin[i]});
     }
-    return {uncentered, centered};
+    // A common translation preserves L2. Use it when it makes the shared
+    // quantization step substantially smaller.
+    centered = radius > 0 && radius < magnitude * 0.875;
+    return centered ? radius : magnitude;
   }
 };
 
@@ -1521,7 +1570,7 @@ inline __m256i code_distances(const BoundCache& cache, size_t block, const __m25
                               __m256i query_norm, size_t stride) {
   constexpr bool full_resolution = Kernel != DotKernel::paired;
   const __m256i ones = _mm256_set1_epi16(1);
-  const auto* code = cache.codes.data() + block * stride;
+  const auto* code = std::assume_aligned<code_alignment>(cache.code_bytes() + block * stride);
   __m256i sum = _mm256_setzero_si256();
   if constexpr (FixedStride != 0) {
     __m256i accum[4]{};
@@ -1556,7 +1605,8 @@ inline __m256i code_distances(const BoundCache& cache, size_t block, const __m25
 template <size_t FixedStride, DotKernel Kernel = DotKernel::paired, typename Probe>
 __attribute__((target("avx2")))
 int32_t scan_bounds(const BoundCache& cache, const BoundQuery& query, const KeyRange& range,
-                    const BoundGroups::Bucket* bucket, Probe probe, int32_t cutoff, size_t seed_limit) {
+                    const BoundGroups::Bucket* bucket, Probe probe, int32_t cutoff, size_t seed_limit,
+                    bool defer) {
   auto rows = std::span(cache.rows);
   if (bucket) rows = rows.subspan(bucket->offset, bucket->count);
   size_t first = rows.data() - cache.rows.data();
@@ -1581,7 +1631,65 @@ int32_t scan_bounds(const BoundCache& cache, const BoundQuery& query, const KeyR
   size_t block = first & ~(code_block - 1);
   if constexpr (FixedStride == geometric_stride) {
     constexpr size_t prefix_rows = 256;
-    if (cutoff == maximum && seed_limit && seed_limit <= 16 && last - first >= prefix_rows) {
+    if (Kernel != DotKernel::paired && defer && range.unrestricted() && !cache.has_outliers &&
+        cutoff == maximum && seed_limit && seed_limit <= 16 && last - first >= prefix_rows) {
+      struct Candidate { int32_t square; uint32_t slot; };
+      std::array<Candidate, 512> pending;
+      std::array<int32_t, 16> closest;
+      size_t pending_count = 0;
+      size_t closest_count = 0;
+      int32_t upper = maximum;
+      auto upper_lanes = _mm256_set1_epi32(upper);
+      const double radius_error = 2.0 * (cache.max_error + query.error + 1e-8);
+      for (; block < last; block += code_block) {
+        const auto square = code_distances<FixedStride, Kernel>(cache, block, broadcast, query_norm, stride);
+        const auto rejected = _mm256_cmpgt_epi32(square, upper_lanes);
+        unsigned mask = 255u ^ static_cast<unsigned>(_mm256_movemask_ps(_mm256_castsi256_ps(rejected)));
+        if (block < first) mask &= 255u << (first - block);
+        if (block + code_block > last) mask &= (1u << (last - block)) - 1;
+        if (!mask) continue;
+        if (pending_count + code_block > pending.size()) {
+          const auto end = std::remove_if(pending.begin(), pending.begin() + pending_count,
+                                         [&](const Candidate& row) { return row.square > upper; });
+          pending_count = end - pending.begin();
+          // Dense candidates can be handled by the regular scan after the
+          // retained prefix has supplied the exact cutoff.
+          if (pending_count > pending.size() / 2) break;
+        }
+        std::array<int32_t, code_block> squares;
+        std::memcpy(squares.data(), &square, sizeof(square));
+        const int32_t previous = closest_count == seed_limit ? closest.front() : maximum;
+        while (mask) {
+          const size_t lane = std::countr_zero(mask);
+          mask &= mask - 1;
+          const int32_t distance = squares[lane];
+          pending[pending_count++] = {distance, static_cast<uint32_t>(block+lane)};
+          if (closest_count < seed_limit) {
+            closest[closest_count++] = distance;
+            std::push_heap(closest.begin(), closest.begin()+closest_count);
+          } else if (distance < closest.front()) {
+            const auto end = closest.begin() + closest_count;
+            std::pop_heap(closest.begin(), end);
+            end[-1] = distance;
+            std::push_heap(closest.begin(), end);
+          }
+        }
+        if (closest_count == seed_limit && closest.front() != previous) {
+          // The K retained codes belong to eligible rows. A code distance
+          // strictly above the Kth plus twice the error cannot enter TopK.
+          const double radius = std::sqrt(closest.front()) + radius_error;
+          upper = static_cast<int32_t>(std::min<double>(std::ceil(radius * radius), maximum));
+          upper_lanes = _mm256_set1_epi32(upper);
+        }
+      }
+      const bool dense = block < last;
+      for (size_t i = 0; i < pending_count; ++i) {
+        const auto item = pending[i];
+        if (item.square <= upper && item.square <= cutoff) {
+          cutoff = probe(cache.rows[item.slot], cutoff, dense);
+        }
+      }
+    } else if (cutoff == maximum && seed_limit && seed_limit <= 16 && last - first >= prefix_rows) {
       struct Candidate { int32_t square; uint16_t offset; };
       std::array<Candidate, prefix_rows> prefix;
       size_t size = 0;
@@ -1938,17 +2046,60 @@ void Database::prepare_bounds(Table& current, std::optional<size_t> equality_col
   double largest = 0;
   std::array<double, geometric_stride> origin;
   bool center = false;
+  std::array<size_t, 64> outliers;
+  size_t outlier_count = 0;
   if (dimension == geometric_stride && budget - slots * (stride + sizeof(BoundRow) + sizeof(int32_t)) >=
                                          geometric_stride * sizeof(double)) {
     CoordinateRange extent;
+    CoordinateRange sample;
+    size_t rows_seen = 0;
     for (const auto& entry : current.rows) {
-      if (!extent.include(vector(entry.second))) return;
+      const auto bytes = vector(entry.second);
+      if (!extent.include(bytes)) return;
+      if (++rows_seen % 64 == 0) sample.include(bytes);
     }
-    const auto [uncentered, centered] = extent.extent(origin);
-    // A common translation preserves L2. Use it when it reduces the
-    // shared quantization step enough to matter.
-    center = centered > 0 && centered < uncentered * 0.875;
-    largest = center ? centered : uncentered;
+    largest = extent.scale_extent(origin, center);
+    std::array<double, geometric_stride> sample_origin;
+    bool sample_centered;
+    const double sample_scale = sample.scale_extent(sample_origin, sample_centered);
+    if (sample_scale > 0 && largest > 4.0 * sample_scale) {
+      // Only try a narrower scale when a small sample and the full range
+      // disagree substantially. Every omitted row is still searched.
+      CoordinateRange limits;
+      const double ceiling = std::numeric_limits<float>::max();
+      for (size_t i = 0; i < sample_origin.size(); ++i) {
+        const double at = sample_centered ? sample_origin[i] : 0.0;
+        limits.low[i] = static_cast<float>(std::max(-ceiling, at - 2.0 * sample_scale));
+        limits.high[i] = static_cast<float>(std::min(ceiling, at + 2.0 * sample_scale));
+      }
+      CoordinateRange core;
+      const size_t max_outliers = std::min(outliers.size(), count / 64);
+      size_t omitted = 0;
+      size_t slot = 0;
+      for (const auto& entry : current.rows) {
+        const auto bytes = vector(entry.second);
+        if (limits.contains(bytes)) {
+          core.include(bytes);
+        } else {
+          if (omitted == max_outliers) {
+            ++omitted;
+            break;
+          }
+          outliers[omitted++] = slot;
+        }
+        ++slot;
+      }
+      if (omitted && omitted <= max_outliers) {
+        bool core_centered;
+        const double core_scale = core.scale_extent(sample_origin, core_centered);
+        if (core_scale > 0 && core_scale < largest * 0.5) {
+          center = core_centered;
+          largest = core_scale;
+          origin = sample_origin;
+          outlier_count = omitted;
+        }
+      }
+    }
   } else {
     for (const auto& entry : current.rows) {
       largest = std::max(largest, largest_component(vector(entry.second)));
@@ -1961,24 +2112,33 @@ void Database::prepare_bounds(Table& current, std::optional<size_t> equality_col
     cache = std::make_unique<BoundCache>();
     cache->rows.reserve(count);
     cache->norms.resize(slots);
-    cache->codes.resize(slots * stride);
+    cache->allocate_codes(slots * stride);
     if (center) cache->origin.assign(origin.begin(), origin.end());
   } catch (const std::bad_alloc&) {
     return;
   }
   if (cache->bytes() > budget) return;
   cache->stride = stride;
+  cache->has_outliers = outlier_count != 0;
   // The query uses twice the row step, keeping the AVX2 pair sum in range.
   cache->inverse_step = 126.0 / largest;
   double max_error_squared = 0;
+  size_t next_outlier = 0;
   const auto pack = [&](BoundRow row) {
-    const auto bytes = vector(row.location());
     const size_t slot = cache->rows.size();
-    auto* out = cache->codes.data() + (slot & ~(code_block - 1)) * stride + (slot % code_block) * code_word;
+    cache->rows.push_back(row);
+    if (next_outlier < outlier_count && slot == outliers[next_outlier]) {
+      ++next_outlier;
+      // The zero code and sentinel norm always pass the integer cutoff.
+      // The probe still verifies the real filter and full-precision distance.
+      cache->norms[slot] = outlier_norm;
+      return;
+    }
+    const auto bytes = vector(row.location());
+    auto* out = cache->code_bytes() + (slot & ~(code_block - 1)) * stride + (slot % code_block) * code_word;
     const auto norm = cache->origin.empty() ? quantize_row(bytes, cache->inverse_step, out, nullptr)
         : quantize_row<true>(bytes, cache->inverse_step, out, cache->origin.data());
     cache->norms[slot] = norm.squared;
-    cache->rows.push_back(row);
     max_error_squared = std::max(max_error_squared, norm.error_squared);
   };
   for (const auto& entry : current.rows) pack({&entry});
@@ -2461,18 +2621,27 @@ void Database::select(const Select& statement, SearchMode mode, ResultSink& sink
           return cutoff;
         };
         const auto* bucket = grouped ? cache.groups->lookup(filter_tag(equality->value)) : nullptr;
-        if (grouped || !cache.groups || range.unrestricted()) {
+        const bool scan_range_by_group = cache.groups && !range.unrestricted() && filters.empty() &&
+            cache.groups->buckets.size() <= geometric_buckets &&
+            current.rows.range_at_least(first, last, 512);
+        if (grouped || !cache.groups || range.unrestricted() || scan_range_by_group) {
           used_bounds = true;
           if (!grouped || bucket) {
             const size_t seed = grouped || filters.empty() ? limit : 0;
+            // Geometric buckets already reduce the scan to the nearest groups.
+            const bool defer = (filter_known || filters.empty()) &&
+                (!cache.groups || !cache.groups->compact_geometry);
             const auto scan = [&](const BoundGroups::Bucket* target, int32_t cutoff) {
-              if (kernel == DotKernel::vex) return scan_bounds<128, DotKernel::vex>(cache, packed, range, target, visit, cutoff, seed);
-              if (kernel == DotKernel::evex) return scan_bounds<128, DotKernel::evex>(cache, packed, range, target, visit, cutoff, seed);
-              if (cache.stride == 128) return scan_bounds<128>(cache, packed, range, target, visit, cutoff, seed);
-              return scan_bounds<0>(cache, packed, range, target, visit, cutoff, 0);
+              if (kernel == DotKernel::vex) return scan_bounds<128, DotKernel::vex>(cache, packed, range, target, visit, cutoff, seed, defer);
+              if (kernel == DotKernel::evex) return scan_bounds<128, DotKernel::evex>(cache, packed, range, target, visit, cutoff, seed, defer);
+              if (cache.stride == 128) return scan_bounds<128>(cache, packed, range, target, visit, cutoff, seed, defer);
+              return scan_bounds<0>(cache, packed, range, target, visit, cutoff, 0, false);
             };
             if (filters.empty() && cache.groups && cache.groups->compact_geometry) {
               scan_geometric_buckets(cache, packed, kernel != DotKernel::paired, scan);
+            } else if (scan_range_by_group) {
+              auto cutoff = std::numeric_limits<int32_t>::max();
+              for (const auto& group : cache.groups->buckets) cutoff = scan(&group, cutoff);
             } else {
               scan(bucket, std::numeric_limits<int32_t>::max());
             }

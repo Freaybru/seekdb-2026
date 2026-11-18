@@ -1190,6 +1190,50 @@ def centered_bounds(binary, root):
     print("Centered TopK: integer ranks, ties, query outside bounds, rollback and restart passed")
 
 
+def outlier_bounds(binary, root):
+    rng = random.Random(91846)
+    values = {key: [rng.randrange(-16, 17) for _ in range(128)] for key in range(800)}
+    extreme = [-144] + [-16] * 127
+    values[731] = values[733] = extreme
+    tags = {key: key % 3 for key in values}
+    tags[733] = 2
+    core_query = [-16] * 128
+
+    def text(vector):
+        return json.dumps([x / 16 for x in vector])
+
+    def check(db):
+        cases = [('WHERE tag=2', [k for k in values if tags[k] == 2], core_query, 1),
+                 ('', list(values), core_query, 10),
+                 ('WHERE id>=101 AND id<750', list(range(101, 750)), core_query, 10),
+                 ('WHERE tag=2 AND id>=729', [k for k in values if tags[k] == 2 and k >= 729], core_query, 10),
+                 ('', list(values), extreme, 2)]
+        for where, keys, query, limit in cases:
+            order = sorted(keys, key=lambda k: (sum((a-b)**2 for a,b in zip(values[k],query)), k))
+            sql = f"SELECT id FROM t {where} ORDER BY L2_DISTANCE(v,'{text(query)}') LIMIT {limit}"
+            assert db.query(sql) == [[str(key)] for key in order[:limit]]
+
+    with Session(binary, root) as db:
+        db.ok("CREATE TABLE t (id BIGINT PRIMARY KEY, tag BIGINT, v VECTOR(128))")
+        for first in range(0, len(values), 80):
+            rows = ','.join(f"({k},{tags[k]},'{text(values[k])}')" for k in range(first, first+80))
+            db.ok("INSERT INTO t VALUES " + rows, 80)
+        db.ok("CREATE VECTOR INDEX i ON t(v)")
+        check(db)
+        db.ok("BEGIN")
+        db.ok(f"UPDATE t SET v='{text(core_query)}' WHERE id=733", 1)
+        values[733] = core_query
+        check(db)
+        db.ok("ROLLBACK")
+        values[733] = extreme
+        check(db)
+        db.kill()
+    with Session(binary, root) as db:
+        check(db)
+        db.quit()
+    print("Outlier TopK: exact winners, filter, ties, rollback and restart passed")
+
+
 def many_filter_groups(binary, root):
     count, groups = 1426, 713
 
@@ -1307,6 +1351,7 @@ def main():
         grouped_distance_bounds(binary, root / "grouped-bounds")
         shortlist_bounds(binary, root / "shortlist")
         centered_bounds(binary, root / "centered")
+        outlier_bounds(binary, root / "outlier")
         many_filter_groups(binary, root / "filter-groups")
         bounded_memory(binary, root / "large")
         indexed_memory(binary, root / "index-memory")
